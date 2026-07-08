@@ -1,4 +1,5 @@
 """解析 LLM 输出为 Action 对象."""
+import ast
 import json
 import re
 from ai4se_harness.models import Action
@@ -17,8 +18,12 @@ class ActionParser:
             raw = fence_match.group(1).strip()
         try:
             data = json.loads(raw)
-        except json.JSONDecodeError as e:
-            raise ParseError(f"LLM 返回非法 JSON: {raw[:200]}") from e
+        except json.JSONDecodeError:
+            # Fallback: try Python dict syntax (single quotes)
+            try:
+                data = ast.literal_eval(raw)
+            except (ValueError, SyntaxError) as e:
+                raise ParseError(f"LLM 返回非法 JSON: {raw[:200]}") from e
         if not isinstance(data, dict):
             raise ParseError(f"需要 JSON 对象，收到 {type(data).__name__}")
 
