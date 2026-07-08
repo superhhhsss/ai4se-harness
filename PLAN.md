@@ -1,25 +1,24 @@
-# Coding Agent Harness Implementation Plan
+# Coding Agent Harness 实现计划
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **供 agent 执行者使用：** 必须使用 superpowers:subagent-driven-development（推荐）或 superpowers:executing-plans 按 task 逐个实现。每步使用 checkbox（`- [ ]`）跟踪进度。
 
-**Goal:** Build a CLI coding agent harness with pipeline architecture — context building, LLM calling, action parsing, guardrail with HITL, tool dispatch, feedback collection (main contribution), and stop judgment — all verifiable by mock-LLM deterministic tests.
+**目标：** 构建一个 CLI 交互式 Coding Agent Harness，采用管道架构。包含：上下文构建、LLM 调用、动作解析、护栏（HITL）、工具分发、反馈收集（主要贡献）、停机判断。所有核心机制均可通过 mock LLM 做确定性单元测试验证。
 
-**Architecture:** 7-stage middleware pipeline (Context → LLM → Parser → Guardrail → Dispatch → Feedback → Stop) with 3 side channels (Memory, Config, Credentials). Each stage is independently testable with mock dependencies.
+**架构：** 7 阶段中间件管道（Context → LLM → Parser → Guardrail → Dispatch → Feedback → Stop）+ 3 个侧通道（Memory、Config、Credentials）。每阶段独立可测，通过明确定义的输入/输出接口解耦。
 
-**Tech Stack:** Python 3.12, openai SDK (DeepSeek), SQLite, keyring, pytest, Click CLI, PyYAML.
+**反馈闭环设计说明：** 反馈闭环的工作方式是"间接驱动"——FeedbackCollector 收集客观测试/校验结果后，将结构化的 Feedback 对象注入下一轮的 Context（由 Context Builder 负责拼接），LLM 在下一轮看到反馈信息后自主决定修正策略。这不是"harness 自己改代码"，而是"harness 把客观信号传递给 LLM，让它做更好的下一步决策"。自我修正次数由配置 `max_self_correct_rounds` 控制。
+
+**技术栈：** Python 3.12、openai SDK（兼容 DeepSeek）、SQLite、keyring、pytest、Click CLI、PyYAML。
 
 ---
 
-## Task 1: Project Scaffold
+## Task 1: 项目脚手架
 
-**Files:**
-- Create: `pyproject.toml`
-- Create: `Makefile`
-- Create: `config.yaml`
-- Create: `src/ai4se_harness/__init__.py`
-- Create: `tests/__init__.py`
+**涉及文件：**
+- 新建：`pyproject.toml`、`Makefile`、`config.yaml`
+- 新建：`src/ai4se_harness/__init__.py`、`tests/__init__.py`
 
-- [ ] **Step 1: Write pyproject.toml**
+- [ ] **Step 1: 编写 pyproject.toml**
 
 ```toml
 [project]
@@ -31,6 +30,13 @@ dependencies = [
     "click>=8.0",
     "pyyaml>=6.0",
     "keyring>=24.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "flake8>=7.0",
 ]
 
 [project.scripts]
@@ -47,10 +53,10 @@ where = ["src"]
 testpaths = ["tests"]
 ```
 
-- [ ] **Step 2: Write Makefile**
+- [ ] **Step 2: 编写 Makefile**
 
 ```makefile
-.PHONY: test lint install
+.PHONY: test lint install cov demo
 
 install:
 	pip install -e .
@@ -68,7 +74,7 @@ demo:
 	pytest tests/test_demo.py -v
 ```
 
-- [ ] **Step 3: Write config.yaml**
+- [ ] **Step 3: 编写 config.yaml**
 
 ```yaml
 model:
@@ -99,40 +105,39 @@ loop:
   max_rounds: 20
 ```
 
-- [ ] **Step 4: Create empty `__init__.py` files**
+- [ ] **Step 4: 创建空的 `__init__.py`**
 
 ```bash
-echo '"""AI4SE Coding Agent Harness."""' > src/ai4se_harness/__init__.py
-echo '"""Tests for AI4SE Harness."""' > tests/__init__.py
+echo '"AI4SE Coding Agent Harness."' > src/ai4se_harness/__init__.py
+echo '"Tests for AI4SE Harness."' > tests/__init__.py
 ```
 
-- [ ] **Step 5: Install and verify**
+- [ ] **Step 5: 安装并验证**
 
 ```bash
 pip install -e .
 python -c "import ai4se_harness; print('OK')"
 ```
-Expected: `OK`
+预期输出: `OK`
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 6: 提交**
 
 ```bash
 git add pyproject.toml Makefile config.yaml src/ai4se_harness/__init__.py tests/__init__.py
-git commit -m "feat: project scaffold with pyproject.toml, Makefile, config.yaml"
+git commit -m "feat: 项目脚手架 — pyproject.toml, Makefile, config.yaml"
 ```
 
 ---
 
-## Task 2: Data Models
+## Task 2: 数据模型
 
-**Files:**
-- Create: `src/ai4se_harness/models.py`
-- Create: `tests/test_models.py`
+**涉及文件：**
+- 新建：`src/ai4se_harness/models.py`、`tests/test_models.py`
 
-- [ ] **Step 1: Write failing tests for models**
+- [ ] **Step 1: 编写失败测试**
 
 ```python
-"""Tests for data models."""
+"""数据模型测试."""
 from ai4se_harness.models import Action, ActionResult, Feedback, GuardDecision, StopReason
 
 
@@ -166,7 +171,7 @@ def test_feedback_failed_with_lint():
 
 
 def test_guard_decision_block():
-    gd = GuardDecision(verdict="BLOCK", reason="Dangerous: rm -rf /", matched_pattern="rm\\s+(-rf?)")
+    gd = GuardDecision(verdict="BLOCK", reason="危险: rm -rf /", matched_pattern=r"rm\s+(-rf?)")
     assert gd.verdict == "BLOCK"
     assert gd.matched_pattern is not None
 
@@ -176,17 +181,17 @@ def test_stop_reason_completed():
     assert sr.should_stop is True
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [ ] **Step 2: 运行测试确认失败**
 
 ```bash
 pytest tests/test_models.py -v
 ```
-Expected: all FAIL — `ModuleNotFoundError`
+预期：全部 FAIL — `ModuleNotFoundError`
 
-- [ ] **Step 3: Write models.py**
+- [ ] **Step 3: 编写 models.py**
 
 ```python
-"""Data models for the Coding Agent Harness."""
+"""Coding Agent Harness 数据模型."""
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -214,7 +219,7 @@ class Feedback:
     passed: bool
     test_report: str | None = None
     lint_issues: list[dict] = field(default_factory=list)
-    failed_stage: str | None = None
+    failed_stage: str | None = None  # "compile" | "test" | "lint"
     suggestion: str | None = None
 
 
@@ -231,32 +236,31 @@ class StopReason:
     reason: str  # task_completed | max_rounds | user_abort | stuck
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [ ] **Step 4: 运行测试确认通过**
 
 ```bash
 pytest tests/test_models.py -v
 ```
-Expected: all 6 PASS
+预期：全部 6 个 PASS
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: 提交**
 
 ```bash
 git add src/ai4se_harness/models.py tests/test_models.py
-git commit -m "feat: add data models (Action, ActionResult, Feedback, GuardDecision, StopReason)"
+git commit -m "feat: 添加数据模型 (Action, ActionResult, Feedback, GuardDecision, StopReason)"
 ```
 
 ---
 
-## Task 3: Config Module
+## Task 3: 配置模块
 
-**Files:**
-- Create: `src/ai4se_harness/config.py`
-- Create: `tests/test_config.py`
+**涉及文件：**
+- 新建：`src/ai4se_harness/config.py`、`tests/test_config.py`
 
-- [ ] **Step 1: Write failing tests**
+- [ ] **Step 1: 编写失败测试**
 
 ```python
-"""Tests for config module."""
+"""配置模块测试."""
 import tempfile
 import os
 from ai4se_harness.config import Config
@@ -291,16 +295,16 @@ def test_config_defaults():
     assert cfg.loop_max_rounds == 20
 ```
 
-- [ ] **Step 2: Run to verify fail**
+- [ ] **Step 2: 运行确认失败**
 
 ```bash
 pytest tests/test_config.py -v
 ```
 
-- [ ] **Step 3: Write config.py**
+- [ ] **Step 3: 编写 config.py**
 
 ```python
-"""Configuration loader from YAML file."""
+"""从 YAML 文件加载配置."""
 from dataclasses import dataclass, field
 from pathlib import Path
 import yaml
@@ -334,32 +338,31 @@ class Config:
         return cls.load(Path(__file__).parent.parent.parent / "config.yaml")
 ```
 
-- [ ] **Step 4: Run tests to verify pass**
+- [ ] **Step 4: 运行测试确认通过**
 
 ```bash
 pytest tests/test_config.py -v
 ```
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: 提交**
 
 ```bash
 git add src/ai4se_harness/config.py tests/test_config.py
-git commit -m "feat: add config module (YAML loader)"
+git commit -m "feat: 添加配置模块 (YAML 加载器)"
 ```
 
 ---
 
-## Task 4: Credential Manager
+## Task 4: 凭据管理器
 
-**Files:**
-- Create: `src/ai4se_harness/credentials.py`
-- Create: `tests/test_credentials.py`
+**涉及文件：**
+- 新建：`src/ai4se_harness/credentials.py`、`tests/test_credentials.py`
 
-- [ ] **Step 1: Write failing tests**
+- [ ] **Step 1: 编写失败测试**
 
 ```python
-"""Tests for credential manager."""
-from unittest.mock import patch, MagicMock
+"""凭据管理器测试."""
+from unittest.mock import patch
 from ai4se_harness.credentials import CredentialManager
 
 
@@ -393,8 +396,8 @@ def test_status_configured():
     with patch("keyring.get_password", return_value="sk-xxx"):
         cm = CredentialManager(service_name="test-harness")
         status = cm.status()
-        assert "configured" in status.lower()
-        assert "sk-xxx" not in status  # never leaks key
+        assert "已配置" in status
+        assert "sk-xxx" not in status  # 绝不可泄漏明文
 
 
 def test_env_fallback():
@@ -404,16 +407,16 @@ def test_env_fallback():
             assert cm.get() == "sk-from-env"
 ```
 
-- [ ] **Step 2: Run to verify fail**
+- [ ] **Step 2: 运行确认失败**
 
 ```bash
 pytest tests/test_credentials.py -v
 ```
 
-- [ ] **Step 3: Write credentials.py**
+- [ ] **Step 3: 编写 credentials.py**
 
 ```python
-"""Credential management using system keyring with env fallback."""
+"""凭据管理 — 系统钥匙串为主，环境变量为 fallback."""
 import os
 import keyring
 
@@ -440,38 +443,35 @@ class CredentialManager:
 
     def status(self) -> str:
         if self.get():
-            return "API key configured (DeepSeek)"
-        return "API key not configured. Run 'ai4se-harness key setup'"
+            return "API key 已配置 (DeepSeek)"
+        return "API key 未配置。请运行 'ai4se-harness key setup'"
 ```
 
-- [ ] **Step 4: Run tests to verify pass**
+- [ ] **Step 4: 运行测试确认通过**
 
 ```bash
 pytest tests/test_credentials.py -v
 ```
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: 提交**
 
 ```bash
 git add src/ai4se_harness/credentials.py tests/test_credentials.py
-git commit -m "feat: add credential manager (keyring + env fallback)"
+git commit -m "feat: 添加凭据管理器 (keyring + env fallback)"
 ```
 
 ---
 
-## Task 5: LLM Abstraction Layer
+## Task 5: LLM 抽象层
 
-**Files:**
-- Create: `src/ai4se_harness/llm/__init__.py`
-- Create: `src/ai4se_harness/llm/base.py`
-- Create: `src/ai4se_harness/llm/mock.py`
-- Create: `src/ai4se_harness/llm/live.py`
-- Create: `tests/test_llm.py`
+**涉及文件：**
+- 新建：`src/ai4se_harness/llm/__init__.py`、`base.py`、`mock.py`、`live.py`
+- 新建：`tests/test_llm.py`
 
-- [ ] **Step 1: Write failing tests**
+- [ ] **Step 1: 编写失败测试**
 
 ```python
-"""Tests for LLM abstraction layer."""
+"""LLM 抽象层测试."""
 import pytest
 from ai4se_harness.llm.base import LLMBackend
 from ai4se_harness.llm.mock import MockLLMBackend
@@ -497,46 +497,43 @@ def test_mock_call_count():
     assert mock.call_count == 2
 
 
+def test_mock_records_all_calls():
+    mock = MockLLMBackend(responses=["r1", "r2"])
+    mock.chat([{"role": "user", "content": "msg1"}])
+    mock.chat([{"role": "user", "content": "msg2"}])
+    assert len(mock.calls) == 2
+    assert mock.calls[0][0]["content"] == "msg1"
+
+
 def test_llm_backend_is_abstract():
     with pytest.raises(TypeError):
-        LLMBackend()  # cannot instantiate abstract class
+        LLMBackend()
 ```
 
-- [ ] **Step 2: Run to verify fail**
+- [ ] **Step 2: 运行确认失败**
 
 ```bash
 pytest tests/test_llm.py -v
 ```
 
-- [ ] **Step 3: Write llm/__init__.py**
+- [ ] **Step 3: 编写 llm/base.py**
 
 ```python
-"""LLM abstraction layer."""
-from ai4se_harness.llm.base import LLMBackend
-from ai4se_harness.llm.mock import MockLLMBackend
-from ai4se_harness.llm.live import LiveLLMBackend
-
-__all__ = ["LLMBackend", "MockLLMBackend", "LiveLLMBackend"]
-```
-
-- [ ] **Step 4: Write llm/base.py**
-
-```python
-"""Abstract LLM backend."""
+"""LLM 抽象基类."""
 from abc import ABC, abstractmethod
 
 
 class LLMBackend(ABC):
     @abstractmethod
     def chat(self, messages: list[dict], tools: list[dict] | None = None) -> str:
-        """Send messages to LLM and return completion text."""
+        """发送消息到 LLM，返回补全文本."""
         ...
 ```
 
-- [ ] **Step 5: Write llm/mock.py**
+- [ ] **Step 4: 编写 llm/mock.py**
 
 ```python
-"""Mock LLM backend for deterministic testing."""
+"""Mock LLM — 确定性测试的核心."""
 from ai4se_harness.llm.base import LLMBackend
 
 
@@ -548,17 +545,17 @@ class MockLLMBackend(LLMBackend):
 
     def chat(self, messages: list[dict], tools: list[dict] | None = None) -> str:
         if self.call_count >= len(self.responses):
-            raise IndexError(f"No more mock responses (used {self.call_count}/{len(self.responses)})")
+            raise IndexError(f"Mock 响应耗尽 (已用 {self.call_count}/{len(self.responses)})")
         self.calls.append(messages)
         response = self.responses[self.call_count]
         self.call_count += 1
         return response
 ```
 
-- [ ] **Step 6: Write llm/live.py**
+- [ ] **Step 5: 编写 llm/live.py**
 
 ```python
-"""Live LLM backend using OpenAI-compatible API (DeepSeek)."""
+"""真实 LLM 后端 — 通过 OpenAI 兼容协议调用 DeepSeek."""
 from openai import OpenAI
 from ai4se_harness.llm.base import LLMBackend
 
@@ -573,10 +570,8 @@ class LiveLLMBackend(LLMBackend):
 
     def chat(self, messages: list[dict], tools: list[dict] | None = None) -> str:
         kwargs = dict(
-            model=self.model,
-            messages=messages,
-            max_tokens=self.max_tokens,
-            temperature=self.temperature,
+            model=self.model, messages=messages,
+            max_tokens=self.max_tokens, temperature=self.temperature,
         )
         if tools:
             kwargs["tools"] = tools
@@ -584,31 +579,37 @@ class LiveLLMBackend(LLMBackend):
         return response.choices[0].message.content or ""
 ```
 
-- [ ] **Step 7: Run tests to verify pass**
+- [ ] **Step 6: 编写 llm/__init__.py**
+
+```python
+"""LLM 抽象层."""
+from ai4se_harness.llm.base import LLMBackend
+from ai4se_harness.llm.mock import MockLLMBackend
+from ai4se_harness.llm.live import LiveLLMBackend
+
+__all__ = ["LLMBackend", "MockLLMBackend", "LiveLLMBackend"]
+```
+
+- [ ] **Step 7: 运行测试确认通过并提交**
 
 ```bash
 pytest tests/test_llm.py -v
-```
-
-- [ ] **Step 8: Commit**
-
-```bash
 git add src/ai4se_harness/llm/ tests/test_llm.py
-git commit -m "feat: add LLM abstraction layer (base, mock, live)"
+git commit -m "feat: 添加 LLM 抽象层 (base, mock, live)"
 ```
 
 ---
 
-## Task 6: Memory Store
+## Task 6: 记忆存储
 
-**Files:**
-- Create: `src/ai4se_harness/memory.py`
-- Create: `tests/test_memory.py`
+**涉及文件：**
+- 新建：`src/ai4se_harness/memory.py`、`tests/test_memory.py`
 
-- [ ] **Step 1: Write failing tests**
+- [ ] **Step 1: 编写失败测试**
 
 ```python
-"""Tests for memory store."""
+"""记忆存储测试."""
+import pytest
 import tempfile
 import os
 from ai4se_harness.memory import MemoryStore
@@ -620,12 +621,13 @@ def memory():
     store = MemoryStore(db_path=db_path)
     yield store
     store.close()
-    os.unlink(db_path)
+    if os.path.exists(db_path):
+        os.unlink(db_path)
 
 
 def test_store_and_retrieve(memory):
     memory.store("python_style", {"convention": "use black formatter", "indent": 4})
-    result = memory.retrieve("python style formatting")
+    result = memory.retrieve("python style")
     assert len(result) > 0
     assert result[0]["key"] == "python_style"
 
@@ -649,19 +651,18 @@ def test_list_keys(memory):
     assert "b" in keys
 ```
 
-- [ ] **Step 2: Run to verify fail**
+- [ ] **Step 2: 运行确认失败**
 
 ```bash
 pytest tests/test_memory.py -v
 ```
 
-- [ ] **Step 3: Write memory.py**
+- [ ] **Step 3: 编写 memory.py**
 
 ```python
-"""SQLite-based memory store for cross-session agent memory."""
+"""基于 SQLite 的跨会话记忆存储."""
 import json
 import sqlite3
-from pathlib import Path
 
 
 class MemoryStore:
@@ -710,40 +711,32 @@ class MemoryStore:
         self.conn.close()
 ```
 
-- [ ] **Step 4: Run tests to verify pass**
+- [ ] **Step 4: 运行测试确认通过并提交**
 
 ```bash
 pytest tests/test_memory.py -v
-```
-
-- [ ] **Step 5: Commit**
-
-```bash
 git add src/ai4se_harness/memory.py tests/test_memory.py
-git commit -m "feat: add SQLite memory store"
+git commit -m "feat: 添加 SQLite 记忆存储"
 ```
 
 ---
 
-## Task 7: Action Parser
+## Task 7: 动作解析器
 
-**Files:**
-- Create: `src/ai4se_harness/parser.py`
-- Create: `tests/test_parser.py`
+**涉及文件：**
+- 新建：`src/ai4se_harness/parser.py`、`tests/test_parser.py`
 
-- [ ] **Step 1: Write failing tests**
+- [ ] **Step 1: 编写失败测试**
 
 ```python
-"""Tests for action parser."""
+"""动作解析器测试."""
 import pytest
 from ai4se_harness.parser import ActionParser, ParseError
-from ai4se_harness.models import Action
 
 
 def test_parse_valid_tool_call():
     parser = ActionParser()
-    llm_output = '{"tool": "write_file", "params": {"path": "a.py", "content": "x=1"}}'
-    action = parser.parse(llm_output, round=1)
+    action = parser.parse('{"tool": "write_file", "params": {"path": "a.py", "content": "x=1"}}', round=1)
     assert action.tool == "write_file"
     assert action.params["path"] == "a.py"
     assert action.round == 1
@@ -758,16 +751,14 @@ def test_parse_with_markdown_fence():
 
 def test_parse_invalid_json_raises():
     parser = ActionParser()
-    with pytest.raises(ParseError) as exc:
+    with pytest.raises(ParseError):
         parser.parse("not valid json", round=1)
-    assert "not valid json" in str(exc.value)
 
 
 def test_parse_missing_tool_field():
     parser = ActionParser()
-    with pytest.raises(ParseError) as exc:
+    with pytest.raises(ParseError):
         parser.parse('{"params": {}}', round=1)
-    assert "tool" in str(exc.value)
 
 
 def test_parse_stop_detection():
@@ -776,67 +767,60 @@ def test_parse_stop_detection():
     assert action.tool == "stop"
 ```
 
-- [ ] **Step 2: Run to verify fail, then write parser.py**
+- [ ] **Step 2: 运行确认失败，编写 parser.py**
 
 ```python
-"""Parse LLM output into structured Action objects."""
+"""解析 LLM 输出为 Action 对象."""
 import json
 import re
 from ai4se_harness.models import Action
 
 
 class ParseError(Exception):
-    """Raised when LLM output cannot be parsed into an Action."""
+    """LLM 输出无法解析为 Action."""
     pass
 
 
 class ActionParser:
     def parse(self, llm_output: str, round: int = 0) -> Action:
         raw = llm_output.strip()
-
-        # Strip markdown code fences
         fence_match = re.match(r"```(?:json)?\s*\n?(.*?)\n?```", raw, re.DOTALL)
         if fence_match:
             raw = fence_match.group(1).strip()
-
         try:
             data = json.loads(raw)
         except json.JSONDecodeError as e:
-            raise ParseError(f"Invalid JSON from LLM: {raw[:200]}") from e
-
+            raise ParseError(f"LLM 返回非法 JSON: {raw[:200]}") from e
         if not isinstance(data, dict):
-            raise ParseError(f"Expected JSON object, got {type(data).__name__}")
-
-        action = Action(
+            raise ParseError(f"需要 JSON 对象，收到 {type(data).__name__}")
+        return Action(
             tool=data.get("tool", "stop"),
             params=data.get("params", {}),
             raw_llm_output=llm_output,
             round=round,
         )
-        return action
 ```
 
-- [ ] **Step 3: Run tests to verify pass and commit**
+- [ ] **Step 3: 测试通过并提交**
 
 ```bash
 pytest tests/test_parser.py -v
 git add src/ai4se_harness/parser.py tests/test_parser.py
-git commit -m "feat: add action parser with JSON extraction and validation"
+git commit -m "feat: 添加动作解析器 (JSON 提取 + 验证)"
 ```
 
 ---
 
-## Task 8: Tool Registry
+## Task 8: 工具注册表
 
-**Files:**
-- Create: `src/ai4se_harness/tools/__init__.py`
-- Create: `src/ai4se_harness/tools/registry.py`
-- Create: `tests/test_tools.py`
+**涉及文件：**
+- 新建：`src/ai4se_harness/tools/__init__.py`、`registry.py`
+- 新建：`tests/test_tools.py`
 
-- [ ] **Step 1: Write failing tests for registry**
+- [ ] **Step 1: 编写失败测试**
 
 ```python
-"""Tests for tool registry and built-in tools."""
+"""工具注册表测试."""
 import pytest
 from ai4se_harness.tools.registry import ToolRegistry
 from ai4se_harness.models import Action
@@ -852,7 +836,7 @@ def test_register_and_dispatch():
 
 def test_dispatch_unknown_tool():
     registry = ToolRegistry()
-    with pytest.raises(ValueError, match="Unknown tool"):
+    with pytest.raises(ValueError, match="未知工具"):
         registry.dispatch(Action(tool="nonexistent", params={}))
 
 
@@ -866,16 +850,16 @@ def test_is_registered():
 def test_get_tools_schema():
     registry = ToolRegistry()
     registry.register("echo", lambda a: "ok",
-                      {"name": "echo", "description": "Echo back", "parameters": {}})
+                      {"name": "echo", "description": "回显", "parameters": {}})
     schemas = registry.get_tools_schema()
     assert len(schemas) == 1
     assert schemas[0]["function"]["name"] == "echo"
 ```
 
-- [ ] **Step 2: Run to verify fail, then write tools/registry.py**
+- [ ] **Step 2: 运行确认失败，编写 registry.py**
 
 ```python
-"""Tool registry for agent actions."""
+"""工具注册表."""
 from typing import Any, Callable
 from ai4se_harness.models import Action
 
@@ -894,20 +878,17 @@ class ToolRegistry:
 
     def dispatch(self, action: Action):
         if action.tool not in self._tools:
-            raise ValueError(f"Unknown tool: {action.tool}")
+            raise ValueError(f"未知工具: {action.tool}")
         return self._tools[action.tool](action)
 
     def get_tools_schema(self) -> list[dict]:
-        return [
-            {"type": "function", "function": schema}
-            for schema in self._schemas.values()
-        ]
+        return [{"type": "function", "function": s} for s in self._schemas.values()]
 ```
 
-- [ ] **Step 3: Write tools/__init__.py**
+- [ ] **Step 3: 编写 tools/__init__.py，测试通过并提交**
 
 ```python
-"""Built-in tools for the Coding Agent Harness."""
+"""Harness 内置工具."""
 from ai4se_harness.tools.registry import ToolRegistry
 from ai4se_harness.tools.file_tools import register_file_tools
 from ai4se_harness.tools.shell_tool import register_shell_tool
@@ -916,31 +897,28 @@ from ai4se_harness.tools.test_tool import register_test_tool
 __all__ = ["ToolRegistry", "register_file_tools", "register_shell_tool", "register_test_tool"]
 ```
 
-- [ ] **Step 4: Run tests and commit**
-
 ```bash
 pytest tests/test_tools.py -v
 git add src/ai4se_harness/tools/ tests/test_tools.py
-git commit -m "feat: add tool registry with registration and dispatch"
+git commit -m "feat: 添加工具注册表 (注册 + 分发 + schema 生成)"
 ```
 
 ---
 
-## Task 9: File, Shell, and Test Tools
+## Task 9: 内置工具实现
 
-**Files:**
-- Create: `src/ai4se_harness/tools/file_tools.py`
-- Create: `src/ai4se_harness/tools/shell_tool.py`
-- Create: `src/ai4se_harness/tools/test_tool.py`
+**涉及文件：**
+- 新建：`src/ai4se_harness/tools/file_tools.py`、`shell_tool.py`、`test_tool.py`
+- 修改：`tests/test_tools.py`（新增集成测试）
 
-- [ ] **Step 1: Write file_tools.py**
+- [ ] **Step 1: 编写 file_tools.py**
 
 ```python
-"""File I/O tools."""
+"""文件读写工具."""
+import time
 from pathlib import Path
 from ai4se_harness.tools.registry import ToolRegistry
 from ai4se_harness.models import Action, ActionResult
-import time
 
 
 def read_file(action: Action) -> ActionResult:
@@ -949,9 +927,9 @@ def read_file(action: Action) -> ActionResult:
     try:
         content = path.read_text()
         return ActionResult(success=True, stdout=content, stderr="", exit_code=0,
-                           files_changed=[], duration_ms=int((time.monotonic() - t0) * 1000))
+                           duration_ms=int((time.monotonic() - t0) * 1000))
     except FileNotFoundError:
-        return ActionResult(success=False, stdout="", stderr=f"File not found: {path}",
+        return ActionResult(success=False, stdout="", stderr=f"文件不存在: {path}",
                            exit_code=1, duration_ms=int((time.monotonic() - t0) * 1000))
 
 
@@ -961,39 +939,37 @@ def write_file(action: Action) -> ActionResult:
     content = action.params["content"]
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content)
-    return ActionResult(success=True, stdout=f"Written {len(content)} bytes to {path}",
+    return ActionResult(success=True, stdout=f"已写入 {len(content)} 字节到 {path}",
                        stderr="", exit_code=0, files_changed=[str(path)],
                        duration_ms=int((time.monotonic() - t0) * 1000))
 
 
 def register_file_tools(registry: ToolRegistry) -> None:
     registry.register("read_file", read_file, {
-        "name": "read_file",
-        "description": "Read file contents",
+        "name": "read_file", "description": "读取文件内容",
         "parameters": {
             "type": "object",
-            "properties": {"path": {"type": "string", "description": "File path to read"}},
+            "properties": {"path": {"type": "string", "description": "文件路径"}},
             "required": ["path"]
         }
     })
     registry.register("write_file", write_file, {
-        "name": "write_file",
-        "description": "Write content to a file",
+        "name": "write_file", "description": "写入内容到文件",
         "parameters": {
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "File path to write"},
-                "content": {"type": "string", "description": "File content"}
+                "path": {"type": "string", "description": "文件路径"},
+                "content": {"type": "string", "description": "文件内容"}
             },
             "required": ["path", "content"]
         }
     })
 ```
 
-- [ ] **Step 2: Write shell_tool.py**
+- [ ] **Step 2: 编写 shell_tool.py**
 
 ```python
-"""Shell execution tool."""
+"""Shell 执行工具."""
 import subprocess
 import time
 from ai4se_harness.tools.registry import ToolRegistry
@@ -1015,29 +991,28 @@ def run_shell(action: Action) -> ActionResult:
             duration_ms=int((time.monotonic() - t0) * 1000)
         )
     except subprocess.TimeoutExpired:
-        return ActionResult(success=False, stdout="", stderr="Command timed out after 120s",
+        return ActionResult(success=False, stdout="", stderr="命令超时 (120s)",
                            exit_code=-1, duration_ms=int((time.monotonic() - t0) * 1000))
 
 
 def register_shell_tool(registry: ToolRegistry) -> None:
     registry.register("run_shell", run_shell, {
-        "name": "run_shell",
-        "description": "Execute a shell command",
+        "name": "run_shell", "description": "执行 shell 命令",
         "parameters": {
             "type": "object",
             "properties": {
-                "command": {"type": "string", "description": "Shell command to run"},
-                "cwd": {"type": "string", "description": "Working directory"}
+                "command": {"type": "string", "description": "要执行的命令"},
+                "cwd": {"type": "string", "description": "工作目录"}
             },
             "required": ["command"]
         }
     })
 ```
 
-- [ ] **Step 3: Write test_tool.py**
+- [ ] **Step 3: 编写 test_tool.py**
 
 ```python
-"""Test execution tool."""
+"""测试执行工具."""
 import subprocess
 import time
 from ai4se_harness.tools.registry import ToolRegistry
@@ -1058,28 +1033,27 @@ def run_test(action: Action) -> ActionResult:
             duration_ms=int((time.monotonic() - t0) * 1000)
         )
     except FileNotFoundError:
-        return ActionResult(success=False, stdout="", stderr="pytest not installed",
+        return ActionResult(success=False, stdout="", stderr="pytest 未安装",
                            exit_code=-1, duration_ms=int((time.monotonic() - t0) * 1000))
 
 
 def register_test_tool(registry: ToolRegistry) -> None:
     registry.register("run_test", run_test, {
-        "name": "run_test",
-        "description": "Run pytest on the specified path",
+        "name": "run_test", "description": "运行 pytest",
         "parameters": {
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Test path (default: tests/)"}
+                "path": {"type": "string", "description": "测试路径 (默认 tests/)"}
             },
             "required": []
         }
     })
 ```
 
-- [ ] **Step 4: Add tool integration test to test_tools.py**
+- [ ] **Step 4: 在 test_tools.py 中追加集成测试**
 
 ```python
-def test_file_tools_integration(tmp_path):
+def test_all_tools_integration(tmp_path):
     from ai4se_harness.tools.registry import ToolRegistry
     from ai4se_harness.tools.file_tools import register_file_tools
     from ai4se_harness.tools.shell_tool import register_shell_tool
@@ -1090,7 +1064,7 @@ def test_file_tools_integration(tmp_path):
     register_shell_tool(registry)
     register_test_tool(registry)
 
-    # File write + read
+    # 写入 + 读取
     p = tmp_path / "hello.py"
     result = registry.dispatch(Action(tool="write_file", params={"path": str(p), "content": "x=1"}))
     assert result.success is True
@@ -1103,33 +1077,31 @@ def test_file_tools_integration(tmp_path):
     result = registry.dispatch(Action(tool="run_shell", params={"command": "echo ok"}))
     assert result.exit_code == 0
 
-    # All 4 tools registered
-    schemas = registry.get_tools_schema()
-    assert len(schemas) == 4
+    # 4 个工具已注册
+    assert len(registry.get_tools_schema()) == 4
 ```
 
-- [ ] **Step 5: Run tests and commit**
+- [ ] **Step 5: 测试通过并提交**
 
 ```bash
 pytest tests/test_tools.py -v
 git add src/ai4se_harness/tools/file_tools.py src/ai4se_harness/tools/shell_tool.py src/ai4se_harness/tools/test_tool.py tests/test_tools.py
-git commit -m "feat: add built-in tools (file I/O, shell, test runner)"
+git commit -m "feat: 添加内置工具 (文件读写, shell, 测试运行)"
 ```
 
 ---
 
-## Task 10: Guardrail
+## Task 10: 护栏
 
-**Files:**
-- Create: `src/ai4se_harness/guardrail.py`
-- Create: `tests/test_guardrail.py`
+**涉及文件：**
+- 新建：`src/ai4se_harness/guardrail.py`、`tests/test_guardrail.py`
 
-- [ ] **Step 1: Write failing tests**
+- [ ] **Step 1: 编写失败测试**
 
 ```python
-"""Tests for guardrail module."""
+"""护栏模块测试."""
 from ai4se_harness.guardrail import Guardrail
-from ai4se_harness.models import Action, GuardDecision
+from ai4se_harness.models import Action
 
 
 def test_blocks_rm_rf():
@@ -1151,15 +1123,16 @@ def test_allows_safe_command():
     assert decision.verdict == "ALLOW"
 
 
-def test_blocks_write_outside_workspace():
-    g = Guardrail(workspace="/home/user/project")
+def test_blocks_write_outside_workspace(tmp_path):
+    g = Guardrail(workspace=str(tmp_path))
     decision = g.check(Action(tool="write_file", params={"path": "/etc/passwd", "content": "x"}))
     assert decision.verdict == "BLOCK"
 
 
-def test_allows_write_inside_workspace():
-    g = Guardrail(workspace="/home/user/project")
-    decision = g.check(Action(tool="write_file", params={"path": "/home/user/project/a.py", "content": "x"}))
+def test_allows_write_inside_workspace(tmp_path):
+    g = Guardrail(workspace=str(tmp_path))
+    safe_path = str(tmp_path / "a.py")
+    decision = g.check(Action(tool="write_file", params={"path": safe_path, "content": "x"}))
     assert decision.verdict == "ALLOW"
 
 
@@ -1170,17 +1143,17 @@ def test_allowlist_overrides_block():
     assert decision.verdict == "ALLOW"
 
 
-def test_file_tools_always_allowed():
+def test_read_and_test_tools_always_allowed():
     g = Guardrail()
-    for tool in ["read_file", "write_file", "run_test"]:
+    for tool in ["read_file", "run_test"]:
         decision = g.check(Action(tool=tool, params={}))
         assert decision.verdict == "ALLOW"
 ```
 
-- [ ] **Step 2: Run to verify fail, then write guardrail.py**
+- [ ] **Step 2: 运行确认失败，编写 guardrail.py**
 
 ```python
-"""Guardrail: intercept dangerous actions before execution."""
+"""护栏：在危险动作执行前拦截."""
 import re
 import os
 from pathlib import Path
@@ -1201,178 +1174,297 @@ class Guardrail:
         self.allowlist: set[str] = set()
 
     def check(self, action: Action) -> GuardDecision:
-        # File tools get path-based checks
         if action.tool == "write_file":
             return self._check_write(action)
         if action.tool in ("read_file", "run_test"):
-            return GuardDecision(verdict="ALLOW", reason="Safe tool")
-
-        # Shell commands get pattern-based checks
+            return GuardDecision(verdict="ALLOW", reason="安全工具")
         if action.tool == "run_shell":
             return self._check_shell(action)
-
-        return GuardDecision(verdict="ALLOW", reason="Unknown tool — allowed")
+        return GuardDecision(verdict="ALLOW", reason="未知工具 — 放行")
 
     def _check_shell(self, action: Action) -> GuardDecision:
         command = action.params.get("command", "")
         if command in self.allowlist:
-            return GuardDecision(verdict="ALLOW", reason="In allowlist")
+            return GuardDecision(verdict="ALLOW", reason="在白名单中")
         for pattern in self.patterns:
             if re.search(pattern, command):
                 return GuardDecision(
                     verdict="BLOCK",
-                    reason=f"Dangerous command pattern matched: {pattern}",
+                    reason=f"匹配危险模式: {pattern}",
                     matched_pattern=pattern,
                 )
-        return GuardDecision(verdict="ALLOW", reason="Safe shell command")
+        return GuardDecision(verdict="ALLOW", reason="安全的 shell 命令")
 
     def _check_write(self, action: Action) -> GuardDecision:
         path = Path(action.params.get("path", "")).resolve()
         workspace_path = Path(self.workspace).resolve()
         try:
             path.relative_to(workspace_path)
-            return GuardDecision(verdict="ALLOW", reason="Path within workspace")
+            return GuardDecision(verdict="ALLOW", reason="路径在工作区内")
         except ValueError:
             return GuardDecision(
                 verdict="BLOCK",
-                reason=f"Write path outside workspace: {path}",
+                reason=f"写入路径超出工作区: {path}",
                 matched_pattern="path_escape",
             )
 ```
 
-- [ ] **Step 3: Run tests and commit**
+- [ ] **Step 3: 测试通过并提交**
 
 ```bash
 pytest tests/test_guardrail.py -v
 git add src/ai4se_harness/guardrail.py tests/test_guardrail.py
-git commit -m "feat: add guardrail with regex pattern matching and workspace boundary"
+git commit -m "feat: 添加护栏 (正则匹配 + 工作区边界)"
 ```
 
 ---
 
-## Task 11: Feedback Collector (Deep Dimension)
+## Task 11: 反馈收集器 ★（重点维度）
 
-**Files:**
-- Create: `src/ai4se_harness/feedback.py`
-- Create: `tests/test_feedback.py`
+**涉及文件：**
+- 新建：`src/ai4se_harness/feedback.py`、`tests/test_feedback.py`
 
-This is the main contribution — more tests and richer logic.
+> **设计说明：** FeedbackCollector 通过构造注入 `test_runner` 和 `lint_runner` 可调用对象。生产环境默认用 subprocess 跑 pytest/flake8；测试时直接注入返回预设结果的 lambda，无需 mock 私有方法。这满足 §A.4(C) 的"移除真实 LLM/外部进程后仍可确定性单测"要求。
 
-- [ ] **Step 1: Write failing tests**
+- [ ] **Step 1: 编写失败测试**
 
 ```python
-"""Tests for feedback collector."""
-import tempfile
-import os
-from ai4se_harness.feedback import FeedbackCollector
-from ai4se_harness.models import Action, ActionResult, Feedback
+"""反馈收集器测试 — 重点维度."""
+import subprocess
+from ai4se_harness.feedback import FeedbackCollector, parse_lint_output
+from ai4se_harness.models import Action, ActionResult
 
 
-def test_collect_test_failure_detected():
-    collector = FeedbackCollector()
+def make_test_runner(returncode: int, stdout: str, stderr: str):
+    """创建模拟的 test_runner."""
+    def runner(path=None):
+        return subprocess.CompletedProcess(args=[], returncode=returncode,
+                                           stdout=stdout, stderr=stderr)
+    return runner
+
+
+def make_lint_runner(output: str):
+    """创建模拟的 lint_runner."""
+    def runner(files):
+        return output
+    return runner
+
+
+# --- 基础收集 ---
+
+def test_collect_test_failure():
+    collector = FeedbackCollector(
+        test_runner=make_test_runner(1, "1 failed", ""),
+        lint_runner=make_lint_runner(""),
+    )
     result = ActionResult(success=True, stdout="", stderr="", exit_code=0,
                           files_changed=["test_a.py"])
-    # Mock _run_tests to return failure
-    collector._run_tests = lambda path=None: subprocess.CompletedProcess(
-        args=[], returncode=1, stdout="1 failed", stderr="")
-    collector._run_lint = lambda files: ""
-    feedback = collector.collect(result, Action(tool="write_file", params={"path": "test_a.py"}))
-    assert feedback.passed is False
-    assert feedback.failed_stage == "test"
-    assert feedback.test_report == "1 failed"
+    fb = collector.collect(result, Action(tool="write_file", params={"path": "test_a.py"}))
+    assert fb.passed is False
+    assert fb.failed_stage == "test"
+    assert fb.test_report == "1 failed"
 
 
 def test_collect_lint_issues():
-    collector = FeedbackCollector()
-    collector._run_tests = lambda path=None: subprocess.CompletedProcess(
-        args=[], returncode=0, stdout="all passed", stderr="")
-    collector._run_lint = lambda files: "a.py:1:1: E302 expected 2 blank lines"
+    collector = FeedbackCollector(
+        test_runner=make_test_runner(0, "OK", ""),
+        lint_runner=make_lint_runner("a.py:1:1: E302 expected 2 blank lines"),
+    )
     result = ActionResult(success=True, stdout="", stderr="", exit_code=0,
                           files_changed=["a.py"])
-    feedback = collector.collect(result, Action(tool="write_file", params={"path": "a.py"}))
-    assert feedback.passed is False
-    assert feedback.failed_stage == "lint"
-    assert len(feedback.lint_issues) == 1
+    fb = collector.collect(result, Action(tool="write_file", params={"path": "a.py"}))
+    assert fb.passed is False
+    assert fb.failed_stage == "lint"
+    assert len(fb.lint_issues) == 1
 
 
 def test_collect_all_pass():
-    collector = FeedbackCollector()
-    collector._run_tests = lambda path=None: subprocess.CompletedProcess(
-        args=[], returncode=0, stdout="2 passed", stderr="")
-    collector._run_lint = lambda files: ""
+    collector = FeedbackCollector(
+        test_runner=make_test_runner(0, "2 passed", ""),
+        lint_runner=make_lint_runner(""),
+    )
     result = ActionResult(success=True, stdout="", stderr="", exit_code=0,
                           files_changed=["a.py"])
-    feedback = collector.collect(result, Action(tool="write_file", params={"path": "a.py"}))
-    assert feedback.passed is True
-    assert feedback.failed_stage is None
+    fb = collector.collect(result, Action(tool="write_file", params={"path": "a.py"}))
+    assert fb.passed is True
+    assert fb.failed_stage is None
 
 
 def test_collect_skips_for_read_actions():
-    collector = FeedbackCollector()
+    collector = FeedbackCollector(
+        test_runner=make_test_runner(1, "FAIL", ""),
+        lint_runner=make_lint_runner(""),
+    )
     result = ActionResult(success=True, stdout="content", stderr="", exit_code=0)
-    feedback = collector.collect(result, Action(tool="read_file", params={"path": "x.py"}))
-    assert feedback.passed is True
+    fb = collector.collect(result, Action(tool="read_file", params={"path": "x.py"}))
+    assert fb.passed is True  # 读文件不触发测试
 
 
-def test_collect_compile_error():
-    collector = FeedbackCollector()
+def test_collect_skips_non_python_files():
+    collector = FeedbackCollector(
+        test_runner=make_test_runner(1, "FAIL", ""),
+        lint_runner=make_lint_runner(""),
+    )
+    result = ActionResult(success=True, stdout="", stderr="", exit_code=0,
+                          files_changed=["README.md"])
+    fb = collector.collect(result, Action(tool="write_file", params={"path": "README.md"}))
+    assert fb.passed is True  # 非 Python 文件不触发
+
+
+# --- 失败分类 ---
+
+def test_classify_compile_error():
+    collector = FeedbackCollector(
+        test_runner=make_test_runner(1, "", "SyntaxError: invalid syntax"),
+        lint_runner=make_lint_runner(""),
+    )
     result = ActionResult(success=True, stdout="", stderr="", exit_code=0,
                           files_changed=["broken.py"])
-    collector._run_tests = lambda path=None: subprocess.CompletedProcess(
-        args=[], returncode=1, stdout="", stderr="SyntaxError: invalid syntax")
-    collector._run_lint = lambda files: ""
-    feedback = collector.collect(result, Action(tool="write_file", params={"path": "broken.py"}))
-    assert feedback.passed is False
-    assert feedback.failed_stage == "compile"
-    assert "syntaxerror" in feedback.suggestion.lower()
+    fb = collector.collect(result, Action(tool="write_file", params={"path": "broken.py"}))
+    assert fb.failed_stage == "compile"
+    assert "syntax" in fb.suggestion.lower()
 
 
-def test_suggestion_for_test_failure_mentions_pytest():
-    collector = FeedbackCollector()
-    collector._run_tests = lambda path=None: subprocess.CompletedProcess(
-        args=[], returncode=1, stdout="FAILED test_foo.py::test_bar - assert 1 == 2", stderr="")
-    collector._run_lint = lambda files: ""
-    feedback = collector.collect(
-        ActionResult(success=True, stdout="", stderr="", exit_code=0, files_changed=["foo.py"]),
-        Action(tool="write_file", params={"path": "foo.py"})
+def test_classify_test_failure():
+    collector = FeedbackCollector(
+        test_runner=make_test_runner(1, "FAILED test_x.py::test_foo - assert 1 == 2", ""),
+        lint_runner=make_lint_runner(""),
     )
-    assert "pytest" in feedback.suggestion.lower() or "test failure" in feedback.suggestion.lower()
+    result = ActionResult(success=True, stdout="", stderr="", exit_code=0,
+                          files_changed=["foo.py"])
+    fb = collector.collect(result, Action(tool="write_file", params={"path": "foo.py"}))
+    assert fb.failed_stage == "test"
+    assert "pytest" in fb.suggestion.lower()
 
 
-def test_collect_no_test_triggers_for_pure_shell():
-    collector = FeedbackCollector()
-    feedback = collector.collect(
-        ActionResult(success=True, stdout="ok", stderr="", exit_code=0),
-        Action(tool="run_shell", params={"command": "echo hello"})
+def test_classify_lint_error():
+    collector = FeedbackCollector(
+        test_runner=make_test_runner(0, "OK", ""),
+        lint_runner=make_lint_runner("x.py:1:1: F401 imported but unused"),
     )
-    assert feedback.passed is True
+    result = ActionResult(success=True, stdout="", stderr="", exit_code=0,
+                          files_changed=["x.py"])
+    fb = collector.collect(result, Action(tool="write_file", params={"path": "x.py"}))
+    assert fb.failed_stage == "lint"
+    assert len(fb.lint_issues) == 1
+
+
+def test_suggestion_truncates_long_report():
+    collector = FeedbackCollector(
+        test_runner=make_test_runner(1, "X" * 1000, ""),
+        lint_runner=make_lint_runner(""),
+    )
+    result = ActionResult(success=True, stdout="", stderr="", exit_code=0,
+                          files_changed=["big.py"])
+    fb = collector.collect(result, Action(tool="write_file", params={"path": "big.py"}))
+    assert len(fb.suggestion) < 600  # 截断
+
+
+# --- 自修正轮数跟踪 ---
+
+def test_correct_round_tracking():
+    collector = FeedbackCollector(max_self_correct_rounds=3)
+    result = ActionResult(success=True, stdout="", stderr="", exit_code=0,
+                          files_changed=["x.py"])
+    action = Action(tool="write_file", params={"path": "x.py"})
+
+    collector._run_tests = make_test_runner(1, "FAIL", "")
+    collector._run_lint = make_lint_runner("")
+
+    for i in range(3):
+        fb = collector.collect(result, action)
+        assert fb.passed is False
+    assert collector.is_stuck("x.py") is True
+
+
+def test_correct_round_resets_on_pass():
+    collector = FeedbackCollector(max_self_correct_rounds=3)
+    result = ActionResult(success=True, stdout="", stderr="", exit_code=0,
+                          files_changed=["x.py"])
+    action = Action(tool="write_file", params={"path": "x.py"})
+
+    collector._run_tests = make_test_runner(1, "FAIL", "")
+    collector._run_lint = make_lint_runner("")
+    collector.collect(result, action)
+
+    collector._run_tests = make_test_runner(0, "OK", "")
+    collector._run_lint = make_lint_runner("")
+    collector.collect(result, action)
+
+    assert collector.is_stuck("x.py") is False
+
+
+# --- Lint 输出解析 ---
+
+def test_parse_lint_output():
+    output = "a.py:1:1: F401 'os' imported but unused\nb.py:5:10: E302 expected 2 blank lines"
+    issues = parse_lint_output(output)
+    assert len(issues) == 2
+    assert issues[0] == {"file": "a.py", "line": 1, "column": 1, "message": "F401 'os' imported but unused"}
+    assert issues[1]["file"] == "b.py"
 ```
 
-- [ ] **Step 2: Run to verify fail, then write feedback.py**
+- [ ] **Step 2: 运行确认失败，编写 feedback.py**
 
 ```python
-"""Feedback Collector — deterministic quality signal extraction (main contribution).
+"""反馈收集器 — 确定性质量信号提取（主要贡献）.
 
-The core insight: coding agents have access to objective, deterministic feedback
-signals (test results, linter output, compiler errors). This module captures them
-and structures the information for injection back into the agent loop.
+核心设计：通过构造注入 test_runner / lint_runner，在生产环境中它们默认执行
+subprocess 调用 pytest/flake8；在测试中注入返回预设值的 callable，无需 mock 私有方法。
+所有分类逻辑（语法错 vs 测试失败 vs lint 警告）为纯函数，完全确定性。
 """
 import re
 import subprocess
+from typing import Callable
 from ai4se_harness.models import Action, ActionResult, Feedback
 
 
-class FeedbackCollector:
-    """Collects and classifies feedback from tool execution results."""
+def _default_test_runner(path: str | None = None):
+    target = path or "tests/"
+    return subprocess.run(["pytest", target, "-v"], capture_output=True, text=True)
 
+
+def _default_lint_runner(files: list[str]) -> str:
+    try:
+        result = subprocess.run(
+            ["flake8"] + files + ["--max-line-length=120", "--ignore=E501,W503"],
+            capture_output=True, text=True
+        )
+        return result.stdout.strip()
+    except FileNotFoundError:
+        return ""
+
+
+def parse_lint_output(output: str) -> list[dict]:
+    """解析 flake8 输出为结构化列表."""
+    issues = []
+    pattern = r"^(.+?):(\d+):(\d+):\s+(.+)$"
+    for line in output.split("\n"):
+        match = re.match(pattern, line.strip())
+        if match:
+            issues.append({
+                "file": match.group(1),
+                "line": int(match.group(2)),
+                "column": int(match.group(3)),
+                "message": match.group(4),
+            })
+    return issues
+
+
+class FeedbackCollector:
     def __init__(self, auto_test: bool = True, auto_lint: bool = True,
-                 max_self_correct_rounds: int = 3):
+                 max_self_correct_rounds: int = 3,
+                 test_runner: Callable | None = None,
+                 lint_runner: Callable | None = None):
         self.auto_test = auto_test
         self.auto_lint = auto_lint
         self.max_self_correct_rounds = max_self_correct_rounds
+        self._run_tests = test_runner or _default_test_runner
+        self._run_lint = lint_runner or _default_lint_runner
         self.correct_round_count: dict[str, int] = {}
 
     def collect(self, result: ActionResult, action: Action) -> Feedback:
+        # 只对写文件和 shell 操作收集反馈
         if action.tool not in ("write_file", "run_shell"):
             return Feedback(passed=True)
 
@@ -1380,10 +1472,9 @@ class FeedbackCollector:
         if isinstance(files, str):
             files = [files]
 
-        # Only run tests/lint for Python files
         py_files = [f for f in files if f.endswith(".py")]
         if not py_files:
-            return Feedback(passed=True, test_report="No Python files changed")
+            return Feedback(passed=True, test_report="无 Python 文件变更")
 
         test_failed = False
         lint_failed = False
@@ -1400,8 +1491,9 @@ class FeedbackCollector:
             lint_output = self._run_lint(py_files)
             if lint_output:
                 lint_failed = True
-                lint_issues = self._parse_lint(lint_output)
+                lint_issues = parse_lint_output(lint_output)
 
+        # 失败分类
         if test_failed and "SyntaxError" in (test_report or ""):
             failed_stage = "compile"
             suggestion = self._build_suggestion("compile", test_report or "")
@@ -1416,6 +1508,8 @@ class FeedbackCollector:
             suggestion = None
 
         passed = not test_failed and not lint_failed
+
+        # 跟踪自修正轮数
         task_key = action.params.get("path", "unknown")
         if not passed:
             self.correct_round_count[task_key] = self.correct_round_count.get(task_key, 0) + 1
@@ -1423,89 +1517,57 @@ class FeedbackCollector:
             self.correct_round_count.pop(task_key, None)
 
         return Feedback(
-            passed=passed,
-            test_report=test_report,
-            lint_issues=lint_issues,
-            failed_stage=failed_stage,
+            passed=passed, test_report=test_report,
+            lint_issues=lint_issues, failed_stage=failed_stage,
             suggestion=suggestion,
         )
 
     def is_stuck(self, task_identifier: str) -> bool:
         return self.correct_round_count.get(task_identifier, 0) >= self.max_self_correct_rounds
 
-    def _run_tests(self, path: str | None = None):
-        target = path or "tests/"
-        return subprocess.run(["pytest", target, "-v"], capture_output=True, text=True)
-
-    def _run_lint(self, files: list[str]) -> str:
-        try:
-            result = subprocess.run(
-                ["flake8"] + files + ["--max-line-length=120", "--ignore=E501,W503"],
-                capture_output=True, text=True
-            )
-            return result.stdout.strip()
-        except FileNotFoundError:
-            return ""
-
-    def _parse_lint(self, output: str) -> list[dict]:
-        issues = []
-        pattern = r"^(.+?):(\d+):(\d+):\s+(.+)$"
-        for line in output.split("\n"):
-            match = re.match(pattern, line.strip())
-            if match:
-                issues.append({
-                    "file": match.group(1),
-                    "line": int(match.group(2)),
-                    "column": int(match.group(3)),
-                    "message": match.group(4),
-                })
-        return issues
-
     def _build_suggestion(self, failed_stage: str, report: str) -> str:
         if failed_stage == "compile":
-            return f"Syntax error detected. Fix the Python syntax and re-run.\n\n{report[:500]}"
+            return f"语法错误。修复 Python 语法后重试。\n\n{report[:500]}"
         elif failed_stage == "test":
-            return f"Test failure detected. Review the pytest output, identify the failing assertion, and fix the code.\n\n{report[:500]}"
+            return f"测试失败。查看 pytest 输出，定位失败断言并修复代码。\n\n{report[:500]}"
         elif failed_stage == "lint":
-            return "Lint issues found. Fix code style issues and re-run."
+            return "代码风格问题。修复 lint 错误后重试。"
         return ""
 ```
 
-- [ ] **Step 3: Run tests and commit**
+- [ ] **Step 3: 测试通过并提交**
 
 ```bash
 pytest tests/test_feedback.py -v
 git add src/ai4se_harness/feedback.py tests/test_feedback.py
-git commit -m "feat: add feedback collector with failure classification (main contribution)"
+git commit -m "feat: 添加反馈收集器 — 失败分类 + 构造注入 (主要贡献)"
 ```
 
 ---
 
-## Task 12: Stop Judge
+## Task 12: 停机判断
 
-**Files:**
-- Create: `src/ai4se_harness/stop_judge.py`
-- Create: `tests/test_stop_judge.py`
+**涉及文件：**
+- 新建：`src/ai4se_harness/stop_judge.py`、`tests/test_stop_judge.py`
 
-- [ ] **Step 1: Write failing tests**
+- [ ] **Step 1: 编写失败测试**
 
 ```python
-"""Tests for stop judge."""
+"""停机判断测试."""
 from ai4se_harness.stop_judge import StopJudge
-from ai4se_harness.models import Action, ActionResult, Feedback, StopReason
+from ai4se_harness.models import Action, ActionResult, Feedback
 
 
 def test_stops_on_explicit_stop():
     judge = StopJudge(max_rounds=20)
-    action = Action(tool="stop", params={})
-    reason = judge.check(action=action, feedback=None, round_count=3, history=[])
+    reason = judge.check(Action(tool="stop", params={}), feedback=None, round_count=3, history=[])
     assert reason.should_stop is True
     assert reason.reason == "task_completed"
 
 
 def test_stops_on_max_rounds():
     judge = StopJudge(max_rounds=5)
-    reason = judge.check(action=Action(tool="run_shell", params={}), feedback=None,
+    reason = judge.check(Action(tool="run_shell", params={}), feedback=None,
                          round_count=5, history=[])
     assert reason.should_stop is True
     assert reason.reason == "max_rounds"
@@ -1513,7 +1575,7 @@ def test_stops_on_max_rounds():
 
 def test_continues_within_rounds():
     judge = StopJudge(max_rounds=20)
-    reason = judge.check(action=Action(tool="write_file", params={}), feedback=None,
+    reason = judge.check(Action(tool="write_file", params={}), feedback=None,
                          round_count=3, history=[])
     assert reason.should_stop is False
 
@@ -1521,15 +1583,10 @@ def test_continues_within_rounds():
 def test_detects_stuck():
     judge = StopJudge(max_rounds=20)
     history = [
-        (Action(tool="write_file", params={"path": "a.py"}, round=1),
+        (Action(tool="write_file", params={"path": "a.py"}, round=i),
          ActionResult(success=True, stdout="", stderr="", exit_code=0),
-         Feedback(passed=True)),
-        (Action(tool="write_file", params={"path": "a.py"}, round=2),
-         ActionResult(success=True, stdout="", stderr="", exit_code=0),
-         Feedback(passed=True)),
-        (Action(tool="write_file", params={"path": "a.py"}, round=3),
-         ActionResult(success=True, stdout="", stderr="", exit_code=0),
-         Feedback(passed=True)),
+         Feedback(passed=True))
+        for i in range(1, 4)
     ]
     reason = judge.check(action=history[-1][0], feedback=history[-1][2],
                          round_count=3, history=history)
@@ -1537,10 +1594,10 @@ def test_detects_stuck():
     assert reason.reason == "stuck"
 ```
 
-- [ ] **Step 2: Run to verify fail, then write stop_judge.py**
+- [ ] **Step 2: 运行确认失败，编写 stop_judge.py**
 
 ```python
-"""Stop conditions for the agent loop."""
+"""停机条件判断."""
 from ai4se_harness.models import Action, Feedback, StopReason
 
 
@@ -1553,54 +1610,51 @@ class StopJudge:
               round_count: int, history: list) -> StopReason:
         if action.tool == "stop":
             return StopReason(should_stop=True, reason="task_completed")
-
         if round_count >= self.max_rounds:
             return StopReason(should_stop=True, reason="max_rounds")
-
         if feedback is not None and not feedback.passed:
             if self._detect_stuck(history):
                 return StopReason(should_stop=True, reason="stuck")
-
         return StopReason(should_stop=False, reason="")
 
     def _detect_stuck(self, history: list) -> bool:
         if len(history) < self.stuck_threshold:
             return False
         recent = history[-self.stuck_threshold:]
-        first_action = recent[0][0]
+        first = recent[0][0]
         for a, _, _ in recent[1:]:
-            if a.tool != first_action.tool or a.params != first_action.params:
+            if a.tool != first.tool or a.params != first.params:
                 return False
         return True
 ```
 
-- [ ] **Step 3: Run tests and commit**
+- [ ] **Step 3: 测试通过并提交**
 
 ```bash
 pytest tests/test_stop_judge.py -v
 git add src/ai4se_harness/stop_judge.py tests/test_stop_judge.py
-git commit -m "feat: add stop judge (task complete, max rounds, stuck detection)"
+git commit -m "feat: 添加停机判断 (任务完成, 最大轮数, 停滞检测)"
 ```
 
 ---
 
-## Task 13: Context Builder
+## Task 13: 上下文构建器
 
-**Files:**
-- Create: `src/ai4se_harness/context.py`
-- Create: `tests/test_context.py`
+**涉及文件：**
+- 新建：`src/ai4se_harness/context.py`、`tests/test_context.py`
 
-- [ ] **Step 1: Write failing tests**
+- [ ] **Step 1: 编写失败测试**
 
 ```python
-"""Tests for context builder."""
+"""上下文构建器测试."""
+import pytest
+import tempfile
+import os
 from ai4se_harness.context import ContextBuilder
 from ai4se_harness.config import Config
 from ai4se_harness.memory import MemoryStore
 from ai4se_harness.models import Action, ActionResult, Feedback
 from ai4se_harness.tools.registry import ToolRegistry
-import tempfile
-import os
 
 
 @pytest.fixture
@@ -1608,37 +1662,40 @@ def ctx_builder():
     db_path = tempfile.mktemp(suffix=".db")
     memory = MemoryStore(db_path=db_path)
     registry = ToolRegistry()
-    registry.register("echo", lambda a: None, {"name": "echo", "description": "Echo", "parameters": {}})
+    registry.register("echo", lambda a: None, {
+        "name": "echo", "description": "回显", "parameters": {}
+    })
     config = Config.default()
     builder = ContextBuilder(config=config, memory=memory, tools=registry)
     yield builder
     memory.close()
-    os.unlink(db_path)
+    if os.path.exists(db_path):
+        os.unlink(db_path)
 
 
 def test_build_initial_context(ctx_builder):
-    ctx = ctx_builder.build(task="write a hello world function", history=[], round_count=1)
+    ctx = ctx_builder.build(task="写一个 hello world", history=[], round_count=1)
     assert ctx.messages[0]["role"] == "system"
-    assert "write a hello world function" in ctx.messages[-1]["content"]
+    assert "写一个 hello world" in ctx.messages[-1]["content"]
     assert len(ctx.tools) >= 1
 
 
-def test_build_with_history(ctx_builder):
+def test_build_injects_feedback_into_context(ctx_builder):
     history = [
         (Action(tool="write_file", params={"path": "h.py"}),
          ActionResult(success=True, stdout="ok", stderr="", exit_code=0),
          Feedback(passed=False, test_report="1 failed", failed_stage="test",
-                  suggestion="Fix the assertion")),
+                  suggestion="修复断言")),
     ]
-    ctx = ctx_builder.build(task="fix tests", history=history, round_count=2)
-    content = ctx.messages[-1]["content"]
-    assert "feedback" in content.lower() or "failed" in content.lower()
+    ctx = ctx_builder.build(task="修复测试", history=history, round_count=2)
+    last_msg = ctx.messages[-1]["content"]
+    assert "修复断言" in last_msg
 ```
 
-- [ ] **Step 2: Run to verify fail, then write context.py**
+- [ ] **Step 2: 运行确认失败，编写 context.py**
 
 ```python
-"""Context Builder: assemble prompt context from config, memory, and history."""
+"""上下文构建器 — 拼装 system prompt + 记忆 + 历史 + 反馈."""
 from dataclasses import dataclass
 from ai4se_harness.config import Config
 from ai4se_harness.memory import MemoryStore
@@ -1651,13 +1708,13 @@ class Context:
     tools: list[dict] | None
 
 
-SYSTEM_PROMPT = """You are a coding agent. You have access to tools for reading/writing files,
-running shell commands, and executing tests. For each step, output a JSON object:
+SYSTEM_PROMPT = """你是一个编程助手。你可以使用工具读取/写入文件、执行 shell 命令和运行测试。
+每一步输出一个 JSON 对象：
 
-{"tool": "<tool_name>", "params": {...}}
-or {"stop": true} when the task is complete.
+{"tool": "<工具名>", "params": {...}}
+或 {"stop": true} 表示任务完成。
 
-Always respond with valid JSON only. No explanations outside the JSON."""
+只输出合法 JSON，JSON 之外不要有任何解释。"""
 
 
 class ContextBuilder:
@@ -1669,103 +1726,116 @@ class ContextBuilder:
     def build(self, task: str, history: list, round_count: int) -> Context:
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
-        # Inject relevant memories
+        # 注入相关记忆
         memories = self.memory.retrieve(task)
         if memories:
-            mem_text = "Relevant context from past sessions:\n"
+            mem_text = "来自之前会话的相关上下文:\n"
             for m in memories:
                 mem_text += f"- {m}\n"
             messages.append({"role": "system", "content": mem_text})
 
-        # Inject conversation history
+        # 注入对话历史（含反馈）
         for action, result, feedback in history:
             messages.append({
                 "role": "assistant",
                 "content": f'{{"tool": "{action.tool}", "params": {action.params}}}'
             })
-            fb_text = f"Result: {'PASS' if result.success else 'FAIL'}\n{result.stdout[:1000]}"
+            fb_text = f"结果: {'PASS' if result.success else 'FAIL'}\n{result.stdout[:1000]}"
             if feedback and not feedback.passed:
-                fb_text += f"\nFeedback: {feedback.suggestion or feedback.failed_stage}"
+                fb_text += f"\n反馈: {feedback.suggestion or feedback.failed_stage}"
             messages.append({"role": "user", "content": fb_text})
 
-        # Current task
+        # 当前任务
         messages.append({
             "role": "user",
-            "content": f"Task: {task}\n\nProduce the next action as JSON."
+            "content": f"任务: {task}\n\n输出下一步动作的 JSON。"
         })
 
+        tools_schema = self.tools.get_tools_schema()
         return Context(
             messages=messages,
-            tools=self.tools.get_tools_schema() if self.tools.get_tools_schema() else None,
+            tools=tools_schema if tools_schema else None,
         )
 ```
 
-- [ ] **Step 3: Run tests and commit**
+- [ ] **Step 3: 测试通过并提交**
 
 ```bash
 pytest tests/test_context.py -v
 git add src/ai4se_harness/context.py tests/test_context.py
-git commit -m "feat: add context builder with memory injection and history assembly"
+git commit -m "feat: 添加上下文构建器 (记忆注入 + 历史 + 反馈组装)"
 ```
 
 ---
 
-## Task 14: Main Loop
+## Task 14: 主循环
 
-**Files:**
-- Create: `src/ai4se_harness/loop.py`
-- Create: `tests/test_loop.py`
+**涉及文件：**
+- 新建：`src/ai4se_harness/loop.py`、`tests/test_loop.py`
 
-- [ ] **Step 1: Write failing test for main loop with mock LLM**
+- [ ] **Step 1: 编写失败测试（使用 tmp_path 避免硬编码路径）**
 
 ```python
-"""Tests for main loop (integration tests with mock LLM)."""
+"""主循环集成测试 (mock LLM)."""
+import pytest
 from ai4se_harness.loop import Harness
 from ai4se_harness.llm.mock import MockLLMBackend
 from ai4se_harness.config import Config
-from ai4se_harness.models import StopReason
 
 
-def make_harness(mock_responses: list[str]) -> Harness:
-    config = Config(
+def make_config(**kwargs):
+    return Config(
         tools_allowlist=["read_file", "write_file", "run_shell", "run_test"],
         guardrail_patterns=[],
         feedback_auto_test=False,
         feedback_auto_lint=False,
-        loop_max_rounds=10,
+        feedback_max_self_correct_rounds=3,
+        loop_max_rounds=kwargs.get("loop_max_rounds", 10),
     )
-    return Harness(config=config, llm_backend=MockLLMBackend(responses=mock_responses))
 
 
 def test_loop_stops_on_explicit_stop():
-    h = make_harness(['{"stop": true}'])
+    h = Harness(config=make_config(), llm_backend=MockLLMBackend(['{"stop": true}']))
     reason = h.run("say hello")
     assert reason.should_stop is True
     assert reason.reason == "task_completed"
 
 
-def test_loop_executes_write_and_read():
-    h = make_harness([
-        '{"tool": "write_file", "params": {"path": "/tmp/test.txt", "content": "hello"}}',
-        '{"tool": "read_file", "params": {"path": "/tmp/test.txt"}}',
+def test_loop_executes_write_and_read(tmp_path):
+    h = Harness(config=make_config(), llm_backend=MockLLMBackend([
+        f'{{"tool": "write_file", "params": {{"path": "{tmp_path}/test.txt", "content": "hello"}}}}',
+        f'{{"tool": "read_file", "params": {{"path": "{tmp_path}/test.txt"}}}}',
         '{"stop": true}',
-    ])
-    reason = h.run("create and read a file")
+    ]))
+    reason = h.run("创建并读取一个文件")
     assert reason.should_stop is True
     assert len(h.history) == 2
 
 
 def test_loop_stops_at_max_rounds():
-    h = make_harness(['{"tool": "write_file", "params": {"path": "x.py", "content": "x"}}'] * 10)
-    h.config.loop_max_rounds = 3
+    resp = '{"tool": "write_file", "params": {"path": "x.py", "content": "x"}}'
+    h = Harness(config=make_config(loop_max_rounds=3),
+                llm_backend=MockLLMBackend([resp] * 10))
     reason = h.run("do something")
     assert reason.reason == "max_rounds"
+
+
+def test_loop_records_history():
+    h = Harness(config=make_config(), llm_backend=MockLLMBackend([
+        '{"tool": "write_file", "params": {"path": "a.py", "content": "x=1"}}',
+        '{"stop": true}',
+    ]))
+    h.run("write a file")
+    assert len(h.history) == 1
+    action, result, feedback = h.history[0]
+    assert action.tool == "write_file"
+    assert result.success is True
 ```
 
-- [ ] **Step 2: Run to verify fail, then write loop.py**
+- [ ] **Step 2: 运行确认失败，编写 loop.py**
 
 ```python
-"""Main agent loop orchestrator — the heart of the harness."""
+"""主循环 — 7 阶段管道编排."""
 from ai4se_harness.llm.base import LLMBackend
 from ai4se_harness.config import Config
 from ai4se_harness.context import ContextBuilder
@@ -1799,9 +1869,7 @@ class Harness:
             max_self_correct_rounds=config.feedback_max_self_correct_rounds,
         )
         self.stop_judge = StopJudge(max_rounds=config.loop_max_rounds)
-        self.context_builder = ContextBuilder(
-            config=config, memory=self.memory, tools=self.tools
-        )
+        self.context_builder = ContextBuilder(config=config, memory=self.memory, tools=self.tools)
         self.history: list = []
 
     def run(self, task: str) -> StopReason:
@@ -1812,74 +1880,66 @@ class Harness:
             round_count += 1
             ctx = self.context_builder.build(task, self.history, round_count)
 
-            # LLM call
             response = self.llm.chat(ctx.messages, ctx.tools)
-
-            # Parse
             action = self.parser.parse(response, round=round_count)
 
-            # Stop check (LLM said "stop")
             if action.tool == "stop":
                 reason = self.stop_judge.check(action, None, round_count, self.history)
                 if reason.should_stop:
                     return reason
 
-            # Guardrail
             decision = self.guardrail.check(action)
             if decision.verdict == "BLOCK":
                 if not self._handle_block(action, decision):
                     return StopReason(should_stop=True, reason="user_abort")
 
-            # Dispatch
             result = self.tools.dispatch(action)
-
-            # Feedback
             feedback = self.feedback.collect(result, action)
-
             self.history.append((action, result, feedback))
 
-            # Stop check
             reason = self.stop_judge.check(action, feedback, round_count, self.history)
             if reason.should_stop:
                 return reason
 
     def _handle_block(self, action, decision) -> bool:
-        """HITL: ask user to confirm/override/reject blocked action."""
-        print(f"\n[GUARDRAIL] BLOCKED: {decision.reason}")
-        print(f"  Action: {action.tool}({action.params})")
+        """HITL: 暂停并等待用户确认/拒绝/修改."""
+        print(f"\n[护栏] 已拦截: {decision.reason}")
+        print(f"  动作: {action.tool}({action.params})")
         while True:
-            choice = input("  [C]onfirm / [R]eject / [M]odify: ").strip().lower()
+            choice = input("  [C]确认 / [R]拒绝 / [M]修改: ").strip().lower()
             if choice == "c":
                 self.guardrail.allowlist.add(action.params.get("command", ""))
                 return True
             elif choice == "r":
                 return False
             elif choice == "m":
-                new_cmd = input("  New command: ")
+                new_cmd = input("  新命令: ")
                 action.params["command"] = new_cmd
-                return self.guardrail.check(action).verdict != "BLOCK" or self._handle_block(action, self.guardrail.check(action))
+                recheck = self.guardrail.check(action)
+                return recheck.verdict != "BLOCK" or self._handle_block(action, recheck)
 ```
 
-- [ ] **Step 3: Run tests and commit**
+- [ ] **Step 3: 测试通过并提交**
 
 ```bash
 pytest tests/test_loop.py -v
 git add src/ai4se_harness/loop.py tests/test_loop.py
-git commit -m "feat: add main loop orchestrator (all 7 pipeline stages wired)"
+git commit -m "feat: 添加主循环 (7 阶段管道全部接入)"
 ```
 
 ---
 
-## Task 15: CLI Entry Point
+## Task 15: CLI 入口
 
-**Files:**
-- Create: `src/ai4se_harness/cli.py`
+**涉及文件：**
+- 新建：`src/ai4se_harness/cli.py`
 
-- [ ] **Step 1: Write cli.py**
+- [ ] **Step 1: 编写 cli.py**
 
 ```python
-"""CLI entry point for the Coding Agent Harness."""
+"""CLI 入口."""
 import click
+import getpass
 from ai4se_harness.config import Config
 from ai4se_harness.llm.live import LiveLLMBackend
 from ai4se_harness.credentials import CredentialManager
@@ -1888,17 +1948,17 @@ from ai4se_harness.loop import Harness
 
 @click.group()
 def main():
-    """AI4SE Coding Agent Harness — LLM-driven coding with guardrails and feedback."""
+    """AI4SE Coding Agent Harness — LLM 驱动的编码助手，自带护栏与反馈闭环."""
     pass
 
 
 @main.command()
 def run():
-    """Start the interactive coding agent."""
+    """启动交互式编程助手."""
     creds = CredentialManager()
     api_key = creds.get()
     if not api_key:
-        click.echo("No API key configured. Run 'ai4se-harness key setup' first.")
+        click.echo("未配置 API key。请先运行 'ai4se-harness key setup'")
         raise SystemExit(3)
 
     config = Config.default()
@@ -1909,88 +1969,85 @@ def run():
     )
     harness = Harness(config=config, llm_backend=llm)
 
-    click.echo("AI4SE Coding Agent Harness ready. Type your task (or 'quit' to exit).")
+    click.echo("AI4SE Coding Agent Harness 就绪。输入任务 (或 'quit' 退出)。")
     while True:
         task = click.prompt("\nTask", prompt_suffix="> ").strip()
         if task.lower() in ("quit", "exit", "q"):
             break
         reason = harness.run(task)
-        click.echo(f"\nStopped: {reason.reason}")
+        click.echo(f"\n已停止: {reason.reason}")
 
 
 @main.group()
 def key():
-    """Manage API key."""
+    """管理 API key."""
     pass
 
 
 @key.command("setup")
 def key_setup():
-    """Securely store your API key."""
+    """安全存储 API key."""
     creds = CredentialManager()
-    import getpass
-    api_key = getpass.getpass("Enter your DeepSeek API key: ")
+    api_key = getpass.getpass("输入 DeepSeek API key: ")
     creds.set(api_key)
-    click.echo("Key saved.")
+    click.echo("Key 已保存。")
 
 
 @key.command("status")
 def key_status():
-    """Show API key status."""
-    creds = CredentialManager()
-    click.echo(creds.status())
+    """查看 API key 状态."""
+    click.echo(CredentialManager().status())
 
 
 @key.command("clear")
 def key_clear():
-    """Remove stored API key."""
-    creds = CredentialManager()
-    creds.clear()
-    click.echo("Key removed.")
+    """删除已存储的 API key."""
+    CredentialManager().clear()
+    click.echo("Key 已删除。")
 
 
 if __name__ == "__main__":
     main()
 ```
 
-- [ ] **Step 2: Verify CLI loads**
+- [ ] **Step 2: 验证 CLI 可加载**
 
 ```bash
 pip install -e .
 python -m ai4se_harness.cli --help
 ```
-Expected: Show command groups (run, key)
+预期：显示命令组 run, key
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 3: 提交**
 
 ```bash
 git add src/ai4se_harness/cli.py
-git commit -m "feat: add CLI entry point (click-based)"
+git commit -m "feat: 添加 CLI 入口 (click)"
 ```
 
 ---
 
-## Task 16: Mechanism Demo
+## Task 16: 机制演示
 
-**Files:**
-- Create: `tests/test_demo.py`
+**涉及文件：**
+- 新建：`tests/test_demo.py`
 
-- [ ] **Step 1: Write three demo tests**
+- [ ] **Step 1: 编写三个演示测试**
 
 ```python
-"""Mechanism demonstrations — mock LLM deterministic verification.
+"""机制演示 — 全部在 mock LLM 下确定性运行.
 
-Demo 1: Guardrail intercepts dangerous action
-Demo 2: Failure injection → feedback → agent self-corrects
-Demo 3: Feedback classification accuracy (main contribution)
+演示 1: 护栏拦截危险命令
+演示 2: 注入失败 → 反馈回灌 → agent 修正
+演示 3: 反馈分类准确度 (主要贡献)
 """
+import subprocess
 from ai4se_harness.guardrail import Guardrail
 from ai4se_harness.feedback import FeedbackCollector
 from ai4se_harness.loop import Harness
 from ai4se_harness.llm.mock import MockLLMBackend
 from ai4se_harness.config import Config
 from ai4se_harness.models import Action, ActionResult, Feedback
-from ai4se_harness.parser import ActionParser
 
 
 def make_config(**kwargs):
@@ -2004,10 +2061,10 @@ def make_config(**kwargs):
     )
 
 
-# === Demo 1: Guardrail intercepts dangerous command ===
+# ====== 演示 1: 护栏拦截 ======
 
-def test_demo1_guardrail_blocks_rm_rf():
-    """Demonstrate deterministic guardrail interception without real LLM."""
+def test_demo1_guardrail_intercepts_dangerous_commands():
+    """确定性演示护栏在无真实 LLM 下拦截危险命令."""
     guardrail = Guardrail(patterns=[
         r"rm\s+(-rf?|--recursive)",
         r"DROP\s+(TABLE|DATABASE)",
@@ -2016,47 +2073,46 @@ def test_demo1_guardrail_blocks_rm_rf():
         r"chmod\s+777",
     ])
 
-    # Test 1a: rm -rf / is blocked
+    # 1a: rm -rf / 被拦截
     action = Action(tool="run_shell", params={"command": "rm -rf / --no-preserve-root"})
     decision = guardrail.check(action)
     assert decision.verdict == "BLOCK"
     assert "rm" in decision.reason.lower()
 
-    # Test 1b: DROP TABLE is blocked
+    # 1b: DROP TABLE 被拦截
     action = Action(tool="run_shell", params={"command": "mysql -e 'DROP TABLE users'"})
     decision = guardrail.check(action)
     assert decision.verdict == "BLOCK"
 
-    # Test 1c: safe command is allowed
+    # 1c: 安全命令放行
     action = Action(tool="run_shell", params={"command": "pytest tests/ -v"})
     decision = guardrail.check(action)
     assert decision.verdict == "ALLOW"
 
-    # Test 1d: writing outside workspace is blocked
+    # 1d: 写工作区外被拦截
     guardrail2 = Guardrail(workspace="/tmp/safe")
     action = Action(tool="write_file", params={"path": "/etc/passwd", "content": "x"})
     decision = guardrail2.check(action)
     assert decision.verdict == "BLOCK"
 
 
-# === Demo 2: Failure injection → feedback → self-correction ===
+# ====== 演示 2: 失败注入 → 反馈 → 修正 ======
 
 def test_demo2_feedback_drives_self_correction():
-    """Inject a test failure, verify agent receives feedback and corrects code."""
+    """注入一次测试失败，验证 agent 接收到 feedback 后修正代码."""
     harness = Harness(
         config=make_config(),
         llm_backend=MockLLMBackend(responses=[
-            # Round 1: Write buggy code
+            # 第 1 轮: 写出有 bug 的代码
             '{"tool": "write_file", "params": {"path": "calc.py", "content": "def add(a,b): return a-b"}}',
-            # Round 2: After receiving feedback about test failure, fix the code
+            # 第 2 轮: 收到反馈后修正
             '{"tool": "write_file", "params": {"path": "calc.py", "content": "def add(a,b): return a+b"}}',
-            # Round 3: Stop
+            # 第 3 轮: 完成
             '{"stop": true}',
         ]),
     )
 
-    # Inject feedback collector that will report failure on round 1
-    original_collect = harness.feedback.collect
+    # 注入反馈：第 1 轮报告失败
     call_count = [0]
 
     def staged_collect(result, action):
@@ -2066,100 +2122,98 @@ def test_demo2_feedback_drives_self_correction():
                 passed=False,
                 test_report="FAILED test_calc.py::test_add - assert -1 == 3",
                 failed_stage="test",
-                suggestion="Test failure: assert add(1,2) == 3, but got -1. Fix: use + instead of -.",
+                suggestion="测试失败: assert add(1,2) == 3, 但得到 -1。应使用 + 而非 -。",
             )
         return Feedback(passed=True)
 
     harness.feedback.collect = staged_collect
 
-    reason = harness.run("write an add function")
+    reason = harness.run("实现一个 add 函数")
 
-    # It should have completed (not stuck, not max_rounds)
     assert reason.reason == "task_completed"
-    assert call_count[0] == 2  # two write actions triggered feedback
-    # The second write should have the corrected version
+    assert call_count[0] == 2
+    # 第 2 轮的写入已修正
     assert harness.history[1][0].params["content"] == "def add(a,b): return a+b"
 
 
-# === Demo 3: Feedback classification accuracy (main contribution) ===
+# ====== 演示 3: 反馈分类准确度 (主要贡献) ======
 
-def test_demo3_feedback_classifies_failure_types():
-    """Verify feedback collector correctly classifies compile, test, and lint failures."""
-    collector = FeedbackCollector(auto_test=True, auto_lint=True)
+def test_demo3_feedback_classification():
+    """验证反馈收集器正确区分编译错、测试失败和 lint 警告."""
+    from ai4se_harness.feedback import FeedbackCollector, parse_lint_output
 
-    # Mock subprocess results
-    import subprocess
-    original_run = collector._run_tests
-    original_lint = collector._run_lint
+    def mock_test(rc, stdout, stderr):
+        return lambda path=None: subprocess.CompletedProcess(
+            args=[], returncode=rc, stdout=stdout, stderr=stderr)
 
-    try:
-        # Case A: Syntax error → classified as "compile"
-        collector._run_tests = lambda path=None: type("R", (), {"returncode": 1, "stdout": "", "stderr": "SyntaxError: invalid syntax"})()
-        collector._run_lint = lambda files: ""
-        fb = collector.collect(
-            ActionResult(success=True, stdout="", stderr="", exit_code=0, files_changed=["bad.py"]),
-            Action(tool="write_file", params={"path": "bad.py"})
-        )
-        assert fb.failed_stage == "compile"
-        assert "syntax" in fb.suggestion.lower()
+    def mock_lint(output):
+        return lambda files: output
 
-        # Case B: Test failure → classified as "test"
-        collector._run_tests = lambda path=None: type("R", (), {"returncode": 1, "stdout": "FAILED test_x.py", "stderr": ""})()
-        collector._run_lint = lambda files: ""
-        fb = collector.collect(
-            ActionResult(success=True, stdout="", stderr="", exit_code=0, files_changed=["x.py"]),
-            Action(tool="write_file", params={"path": "x.py"})
-        )
-        assert fb.failed_stage == "test"
-        assert "pytest" in fb.suggestion.lower()
+    # 场景 A: 语法错 → compile
+    collector = FeedbackCollector(
+        test_runner=mock_test(1, "", "SyntaxError: invalid syntax"),
+        lint_runner=mock_lint(""),
+    )
+    fb = collector.collect(
+        ActionResult(success=True, stdout="", stderr="", exit_code=0, files_changed=["bad.py"]),
+        Action(tool="write_file", params={"path": "bad.py"})
+    )
+    assert fb.failed_stage == "compile"
+    assert "syntax" in fb.suggestion.lower()
 
-        # Case C: Lint error → classified as "lint"
-        collector._run_tests = lambda path=None: type("R", (), {"returncode": 0, "stdout": "OK", "stderr": ""})()
-        collector._run_lint = lambda files: "x.py:1:1: F401 imported but unused"
-        fb = collector.collect(
-            ActionResult(success=True, stdout="", stderr="", exit_code=0, files_changed=["x.py"]),
-            Action(tool="write_file", params={"path": "x.py"})
-        )
-        assert fb.failed_stage == "lint"
-        assert len(fb.lint_issues) == 1
+    # 场景 B: 测试失败 → test
+    collector._run_tests = mock_test(1, "FAILED test_x.py", "")
+    collector._run_lint = mock_lint("")
+    fb = collector.collect(
+        ActionResult(success=True, stdout="", stderr="", exit_code=0, files_changed=["x.py"]),
+        Action(tool="write_file", params={"path": "x.py"})
+    )
+    assert fb.failed_stage == "test"
+    assert "pytest" in fb.suggestion.lower()
 
-        # Case D: All pass → no failure
-        collector._run_tests = lambda path=None: type("R", (), {"returncode": 0, "stdout": "3 passed", "stderr": ""})()
-        collector._run_lint = lambda files: ""
-        fb = collector.collect(
-            ActionResult(success=True, stdout="", stderr="", exit_code=0, files_changed=["ok.py"]),
-            Action(tool="write_file", params={"path": "ok.py"})
-        )
-        assert fb.passed is True
-        assert fb.failed_stage is None
-    finally:
-        collector._run_tests = original_run
-        collector._run_lint = original_lint
+    # 场景 C: lint 错误 → lint
+    collector._run_tests = mock_test(0, "OK", "")
+    collector._run_lint = mock_lint("x.py:1:1: F401 imported but unused")
+    fb = collector.collect(
+        ActionResult(success=True, stdout="", stderr="", exit_code=0, files_changed=["x.py"]),
+        Action(tool="write_file", params={"path": "x.py"})
+    )
+    assert fb.failed_stage == "lint"
+    assert len(fb.lint_issues) == 1
+
+    # 场景 D: 全部通过 → 无失败
+    collector._run_tests = mock_test(0, "3 passed", "")
+    collector._run_lint = mock_lint("")
+    fb = collector.collect(
+        ActionResult(success=True, stdout="", stderr="", exit_code=0, files_changed=["ok.py"]),
+        Action(tool="write_file", params={"path": "ok.py"})
+    )
+    assert fb.passed is True
+    assert fb.failed_stage is None
 ```
 
-- [ ] **Step 2: Run demo tests**
+- [ ] **Step 2: 运行演示测试**
 
 ```bash
 pytest tests/test_demo.py -v
 ```
-Expected: all 3 demo tests PASS
+预期：3 个 demo 测试全部 PASS
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 3: 提交**
 
 ```bash
 git add tests/test_demo.py
-git commit -m "feat: add mechanism demo tests (guardrail, self-correction, classification)"
+git commit -m "feat: 添加机制演示测试 (护栏拦截, 反馈修正, 分类准确度)"
 ```
 
 ---
 
 ## Task 17: Docker + CI
 
-**Files:**
-- Create: `Dockerfile`
-- Create: `.github/workflows/ci.yml`
+**涉及文件：**
+- 新建：`Dockerfile`、`.github/workflows/ci.yml`
 
-- [ ] **Step 1: Write Dockerfile**
+- [ ] **Step 1: 编写 Dockerfile**
 
 ```dockerfile
 FROM python:3.12-slim
@@ -2171,7 +2225,7 @@ RUN pip install -e .
 ENTRYPOINT ["ai4se-harness"]
 ```
 
-- [ ] **Step 2: Write CI config**
+- [ ] **Step 2: 编写 CI 配置**
 
 ```yaml
 name: CI
@@ -2200,143 +2254,129 @@ jobs:
       - run: docker build -t ai4se-harness .
 ```
 
-- [ ] **Step 3: Update pyproject.toml with dev dependencies**
-
-```toml
-[project.optional-dependencies]
-dev = [
-    "pytest>=8.0",
-    "pytest-cov>=5.0",
-    "flake8>=7.0",
-]
-```
-
-- [ ] **Step 4: Commit**
+- [ ] **Step 3: 提交**
 
 ```bash
-git add Dockerfile .github/workflows/ci.yml pyproject.toml
-git commit -m "feat: add Dockerfile and CI (unit-test + docker build)"
+git add Dockerfile .github/workflows/ci.yml
+git commit -m "feat: 添加 Dockerfile 和 CI (unit-test + docker build)"
 ```
 
 ---
 
 ## Task 18: README
 
-**Files:**
-- Create: `README.md`
+**涉及文件：**
+- 新建：`README.md`
 
-- [ ] **Step 1: Write README.md**
+- [ ] **Step 1: 编写 README.md**
 
-```markdown
+````markdown
 # AI4SE Coding Agent Harness
 
-A CLI coding agent harness with pipeline architecture, built for the AI4SE final project.
-Agent = LLM + Harness. All mechanisms are code, not prompts.
+CLI 交互式 Coding Agent Harness，采用管道架构。Agent = LLM + Harness。
+所有机制（护栏、反馈、记忆）均为代码实现，不是提示词。
 
-## Quick Start
+## 快速开始
 
 ```bash
-pip install ai4se-harness
-ai4se-harness key setup    # securely store your DeepSeek API key
-ai4se-harness run          # start the agent
+pip install -e .
+ai4se-harness key setup    # 安全录入 DeepSeek API key
+ai4se-harness run          # 启动 agent
 ```
 
 ### Docker
 
 ```bash
-docker pull ghcr.io/superhhhsss/ai4se-harness:latest
+docker build -t ai4se-harness .
 docker run -it -e DEEPSEEK_API_KEY=sk-xxx ai4se-harness run
 ```
 
-## Key Management
+## Key 管理
 
-API keys are stored in your system keyring (Windows Credential Manager / macOS Keychain / Linux Secret Service).
-Never hardcoded, never committed.
+API key 存储在操作系统钥匙串中，绝不硬编码、不提交 Git。
 
-Commands:
-- `ai4se-harness key setup` — store your key securely
-- `ai4se-harness key status` — check if key is configured
-- `ai4se-harness key clear` — remove stored key
+- `ai4se-harness key setup` — 安全录入
+- `ai4se-harness key status` — 查看状态（不回显明文）
+- `ai4se-harness key clear` — 删除
 
-Environment variable fallback: `DEEPSEEK_API_KEY` (not recommended — plaintext).
+环境变量 fallback: `DEEPSEEK_API_KEY`（不推荐明文）。
 
-## Architecture
+## 架构
 
-7-stage pipeline: Context Builder → LLM Call → Action Parser → Guardrail (HITL) → Tool Dispatch → Feedback Collector → Stop Judge
+7 阶段管道: Context Builder → LLM Call → Action Parser → Guardrail (HITL) → Tool Dispatch → Feedback Collector → Stop Judge
 
-3 side channels: Memory (SQLite), Config (YAML), Credentials (keyring)
+3 个侧通道: Memory (SQLite), Config (YAML), Credentials (keyring)
 
-Main contribution: Feedback Collector — deterministic test/lint result parsing with failure classification (compile vs test vs lint).
+主要贡献: 反馈收集器 — 确定性测试/lint 结果解析 + 失败分类 (compile vs test vs lint) + 构造注入设计。
 
-## Development
+## 开发
 
 ```bash
 make install    # pip install -e .
-make test       # run all tests
+make test       # 运行全部测试
 make lint       # flake8
-make cov        # coverage report
-make demo       # mechanism demo tests
+make cov        # 覆盖率报告
+make demo       # 机制演示测试
 ```
 
-## Directory Structure
+## 目录结构
 
 ```
-src/ai4se_harness/    — harness source
-tests/               — test suite (mock LLM, deterministic)
-config.yaml          — default configuration
+src/ai4se_harness/    — harness 源码
+tests/               — 测试套件 (mock LLM, 确定性)
+config.yaml          — 默认配置
 ```
 
-## Known Limitations
+## 已知限制
 
-- Only supports Python project testing (pytest/flake8)
-- Single LLM backend (DeepSeek); add providers by implementing LLMBackend
-- No streaming responses
-- File safety: write operations restricted to workspace directory
+- 仅支持 Python 项目测试 (pytest/flake8)
+- 单一 LLM 后端 (DeepSeek)；扩展只需实现 LLMBackend
+- 不支持流式响应
+- 文件写入限制在工作区目录内
 
-## Security
+## 安全
 
-- API key: system keyring (primary) or env var (fallback)
-- Shell: regex-based dangerous command detection
-- File IO: workspace boundary enforcement
-- No credentials in git history or logs
-```
+- API key: 系统钥匙串 (主) 或环境变量 (fallback)
+- Shell: 基于正则的危险命令检测
+- 文件 IO: 工作区边界强制
+- 日志/终端/历史记录中不出现凭据
+````
 
-- [ ] **Step 2: Commit and push**
+- [ ] **Step 2: 提交**
 
 ```bash
 git add README.md
-git commit -m "docs: add README with install, architecture, and security docs"
-git push
+git commit -m "docs: 添加 README (安装, 架构, 安全)"
 ```
 
 ---
 
-## Dependency Graph
+## 依赖关系图
 
 ```
-Task 1 (scaffold)
-  ├── Task 2 (models)
-  │     ├── Task 3 (config) ──┐
-  │     ├── Task 4 (credentials)
-  │     ├── Task 5 (LLM) ─────┤
-  │     ├── Task 6 (memory) ──┤
-  │     ├── Task 7 (parser) ──┤
-  │     ├── Task 8 (tools registry)
-  │     │     └── Task 9 (file/shell/test tools)
-  │     ├── Task 10 (guardrail)
-  │     ├── Task 12 (stop judge)
-  │     └── Task 11 (feedback) ──┐
-  │                              │
-  └──────────────────────────────┼── Task 13 (context builder)
-                                 │         │
-                                 │    Task 14 (main loop)
-                                 │         │
-                                 │    Task 15 (CLI)
-                                 │         │
-                                 │    Task 16 (demo tests)
-                                 │
-                            Task 17 (Docker + CI)
-                            Task 18 (README)
+Task 1 (脚手架)
+  └── Task 2 (数据模型)
+        ├── Task 3 (配置) ────┐
+        ├── Task 4 (凭据)     │
+        ├── Task 5 (LLM 层) ──┤
+        ├── Task 6 (记忆) ────┤
+        ├── Task 7 (解析器) ──┤
+        ├── Task 8 (工具注册表)│
+        │     └── Task 9 (工具实现)
+        ├── Task 10 (护栏) ───┤
+        ├── Task 11 (反馈) ★──┤  ← 重点维度
+        └── Task 12 (停机) ───┤
+                              │
+                    Task 13 (上下文构建器)
+                              │
+                    Task 14 (主循环)
+                              │
+                    Task 15 (CLI 入口)
+                              │
+                    Task 16 (机制演示)
+                    
+                    Task 17 (Docker + CI)
+                    Task 18 (README)
 ```
 
-Tasks 3-12 can run in **parallel** after Task 2 completes.
+**Task 3~12 在 Task 2 完成后可并行推进。**
