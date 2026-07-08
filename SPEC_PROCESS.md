@@ -2,7 +2,7 @@
 
 ## 验证方式
 
-使用当前 Claude Code（DeepSeek v4 pro）作为"陌生 agent"，仅提供 `SPEC.md` + `PLAN.md`，不提供任何口头解释，模拟一个全新 agent 按 PLAN 实现 Task 1 和 Task 2。
+使用 Codex CLI 作为第二个 agent，全新会话，仅提供 `SPEC.md` + `PLAN.md`，不导入任何先前对话历史或 memory，让它按 PLAN 实现 Task 1 和 Task 2。
 
 ## 关键发现
 
