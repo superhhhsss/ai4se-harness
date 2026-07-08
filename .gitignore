@@ -30,8 +30,9 @@ Thumbs.db
 # Logs
 *.log
 
-# Superpowers
-.superpowers/
+# AI-generated workspace
+workspace/*
+!workspace/.gitkeep
 
 # Credentials
 credentials.json

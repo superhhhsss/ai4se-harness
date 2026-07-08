@@ -23,12 +23,13 @@ def run():
         raise SystemExit(3)
 
     config = Config.default()
+    workspace = config.model.get("workspace", "./workspace")
     llm = LiveLLMBackend(
         api_key=api_key,
         base_url=config.model.get("api_base", "https://api.deepseek.com"),
         model=config.model.get("model", "deepseek-chat"),
     )
-    harness = Harness(config=config, llm_backend=llm)
+    harness = Harness(config=config, llm_backend=llm, workspace=workspace)
 
     click.echo("AI4SE Coding Agent Harness 就绪。输入任务 (或 'quit' 退出)。")
     while True:

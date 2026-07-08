@@ -5,6 +5,8 @@ model:
   max_tokens: 4096
   temperature: 0.1
 
+workspace: ./workspace
+
 tools:
   allowlist: [read_file, write_file, run_shell, run_test]
 
