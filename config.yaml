@@ -1,0 +1,26 @@
+model:
+  provider: deepseek
+  api_base: https://api.deepseek.com
+  model: deepseek-chat
+  max_tokens: 4096
+  temperature: 0.1
+
+tools:
+  allowlist: [read_file, write_file, run_shell, run_test]
+
+guardrail:
+  dangerous_patterns:
+    - "rm\\s+(-rf?|--recursive)"
+    - "DROP\\s+(TABLE|DATABASE)"
+    - "sudo\\s+"
+    - ">\\s*/dev/"
+    - "chmod\\s+777"
+    - "git\\s+push\\s+.*(--force|-f)"
+
+feedback:
+  auto_test: true
+  auto_lint: true
+  max_self_correct_rounds: 3
+
+loop:
+  max_rounds: 20

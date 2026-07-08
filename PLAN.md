@@ -8,6 +8,8 @@
 
 **反馈闭环设计说明：** 反馈闭环的工作方式是"间接驱动"——FeedbackCollector 收集客观测试/校验结果后，将结构化的 Feedback 对象注入下一轮的 Context（由 Context Builder 负责拼接），LLM 在下一轮看到反馈信息后自主决定修正策略。这不是"harness 自己改代码"，而是"harness 把客观信号传递给 LLM，让它做更好的下一步决策"。自我修正次数由配置 `max_self_correct_rounds` 控制。
 
+**平台兼容性：** 本计划假设 Unix/Linux 环境。Windows 用户需注意：`make` 命令可用 `python -m pytest tests/ -v` 等替代；mkdir 使用 `mkdir -p`（bash 下可用）；路径分隔符使用 `/`。
+
 **技术栈：** Python 3.12、openai SDK（兼容 DeepSeek）、SQLite、keyring、pytest、Click CLI、PyYAML。
 
 ---
@@ -44,7 +46,7 @@ ai4se-harness = "ai4se_harness.cli:main"
 
 [build-system]
 requires = ["setuptools>=75.0"]
-build-backend = "setuptools.backends._legacy:_Backend"
+build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -119,6 +121,13 @@ pip install -e .
 python -c "import ai4se_harness; print('OK')"
 ```
 预期输出: `OK`
+
+- [ ] **Step 5b: 安装开发依赖**
+
+```bash
+pip install -e ".[dev]"
+```
+预期：pytest, pytest-cov, flake8 安装成功
 
 - [ ] **Step 6: 提交**
 
@@ -516,7 +525,11 @@ def test_llm_backend_is_abstract():
 pytest tests/test_llm.py -v
 ```
 
-- [ ] **Step 3: 编写 llm/base.py**
+- [ ] **Step 3: 创建 llm 子目录并编写 llm/base.py**
+
+```bash
+mkdir -p src/ai4se_harness/llm
+```
 
 ```python
 """LLM 抽象基类."""
@@ -856,7 +869,11 @@ def test_get_tools_schema():
     assert schemas[0]["function"]["name"] == "echo"
 ```
 
-- [ ] **Step 2: 运行确认失败，编写 registry.py**
+- [ ] **Step 2: 创建 tools 子目录，运行确认失败，编写 registry.py**
+
+```bash
+mkdir -p src/ai4se_harness/tools
+```
 
 ```python
 """工具注册表."""
