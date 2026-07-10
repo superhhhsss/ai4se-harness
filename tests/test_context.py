@@ -40,6 +40,6 @@ def test_build_injects_feedback_into_context(ctx_builder):
                   suggestion="修复断言")),
     ]
     ctx = ctx_builder.build(task="修复测试", history=history, round_count=2)
-    # Feedback should be in the user message that follows the assistant action
-    feedback_messages = [m for m in ctx.messages if m["role"] == "user" and "修复断言" in m["content"]]
+    # Feedback should be in a tool role message
+    feedback_messages = [m for m in ctx.messages if m["role"] == "tool" and "修复断言" in m.get("content", "")]
     assert len(feedback_messages) >= 1

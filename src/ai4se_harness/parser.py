@@ -13,6 +13,15 @@ class ParseError(Exception):
 class ActionParser:
     def parse(self, llm_output: str, round: int = 0) -> Action:
         raw = llm_output.strip()
+
+        # Handle plain text "stop" or similar
+        if not raw or raw.lower() in ("stop", "done", "finished", "completed"):
+            return Action(tool="stop", params={}, raw_llm_output=llm_output, round=round)
+
+        # Handle text that contains "stop" as the main intent
+        if raw.lower().startswith("stop"):
+            return Action(tool="stop", params={}, raw_llm_output=llm_output, round=round)
+
         fence_match = re.match(r"```(?:json)?\s*\n?(.*?)\n?```", raw, re.DOTALL)
         if fence_match:
             raw = fence_match.group(1).strip()

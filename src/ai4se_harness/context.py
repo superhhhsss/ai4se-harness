@@ -1,4 +1,5 @@
 """上下文构建器 — 拼装 system prompt + 记忆 + 历史 + 反馈."""
+import json
 from dataclasses import dataclass
 from ai4se_harness.config import Config
 from ai4se_harness.memory import MemoryStore
@@ -11,13 +12,7 @@ class Context:
     tools: list[dict] | None
 
 
-SYSTEM_PROMPT = """你是一个编程助手。你可以使用工具读取/写入文件、执行 shell 命令和运行测试。
-每一步输出一个 JSON 对象：
-
-{"tool": "<工具名>", "params": {...}}
-或 {"stop": true} 表示任务完成。
-
-只输出合法 JSON，JSON 之外不要有任何解释。"""
+SYSTEM_PROMPT = """You are a coding assistant. Use the available tools to read/write files, run shell commands, and execute tests. Complete each task step by step. When the task is done, call no more tools and simply respond with 'stop'."""
 
 
 class ContextBuilder:
@@ -25,30 +20,54 @@ class ContextBuilder:
         self.config = config
         self.memory = memory
         self.tools = tools
+        self._tool_call_id = 0
 
     def build(self, task: str, history: list, round_count: int) -> Context:
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
         memories = self.memory.retrieve(task)
         if memories:
-            mem_text = "来自之前会话的相关上下文:\n"
+            mem_text = "Relevant context from past sessions:\n"
             for m in memories:
                 mem_text += f"- {m}\n"
             messages.append({"role": "system", "content": mem_text})
 
         for action, result, feedback in history:
+            tool_name = action.tool
+            if tool_name == "stop":
+                messages.append({"role": "assistant", "content": "stop"})
+                continue
+
+            self._tool_call_id += 1
+            call_id = f"call_{self._tool_call_id}"
+
+            # Assistant message with tool_calls
             messages.append({
                 "role": "assistant",
-                "content": f'{{"tool": "{action.tool}", "params": {action.params}}}'
+                "content": None,
+                "tool_calls": [{
+                    "id": call_id,
+                    "type": "function",
+                    "function": {
+                        "name": tool_name,
+                        "arguments": json.dumps(action.params, ensure_ascii=False)
+                    }
+                }]
             })
-            fb_text = f"结果: {'PASS' if result.success else 'FAIL'}\n{result.stdout[:1000]}"
+
+            # Tool result message
+            fb_text = f"Result: {'PASS' if result.success else 'FAIL'}\nstdout: {result.stdout[:1000]}\nstderr: {result.stderr[:500]}"
             if feedback and not feedback.passed:
-                fb_text += f"\n反馈: {feedback.suggestion or feedback.failed_stage}"
-            messages.append({"role": "user", "content": fb_text})
+                fb_text += f"\nFeedback: {feedback.suggestion or feedback.failed_stage}"
+            messages.append({
+                "role": "tool",
+                "tool_call_id": call_id,
+                "content": fb_text
+            })
 
         messages.append({
             "role": "user",
-            "content": f"任务: {task}\n\n输出下一步动作的 JSON。"
+            "content": f"Task: {task}\n\nProceed with the next step."
         })
 
         tools_schema = self.tools.get_tools_schema()
